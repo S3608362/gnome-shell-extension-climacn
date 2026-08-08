@@ -1,0 +1,48 @@
+/* 顶栏指示器布局 */
+.climacn-indicator-box {
+  spacing: 4px;
+}
+
+/* 顶栏天气图标：反转颜色（黑变白），解决黑色顶栏隐形问题 */
+.climacn-panel-icon {
+  /* 如果需要调整图标大小，保留 icon-size 即可 */
+}
+
+/* 温度标签 */
+.climacn-temperature {
+  font-weight: bold;
+  font-size: 0.9em;
+}
+
+/* 下拉菜单详情区域 */
+.climacn-details-box {
+  padding: 8px 16px;
+  spacing: 6px;
+}
+
+/* 详情行布局 */
+.climacn-detail-row {
+  spacing: 8px;
+}
+
+/* 详情标签文字（标题） */
+.climacn-detail-label {
+  font-size: 0.95em;
+}
+
+/* 详情数值文字 */
+.climacn-detail-value {
+  font-size: 0.95em;
+  font-weight: bold;
+}
+
+/* 刷新按钮图标 */
+.climacn-refresh-icon {
+  icon-size: 14px;
+}
+
+/* 城市搜索输入框 */
+.climacn-search-entry {
+  padding: 4px 8px;
+  font-size: 0.95em;
+}

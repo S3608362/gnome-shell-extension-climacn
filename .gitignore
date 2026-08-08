@@ -1,0 +1,4 @@
+schemas/gschemas.compiled
+settings.json
+*.zip
+.DS_Store

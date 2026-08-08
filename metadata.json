@@ -1,0 +1,7 @@
+{
+  "name": "ClimaCN",
+  "description": "Live China weather, right on your desktop.",
+  "uuid": "climacn@outlook.com",
+  "shell-version": [ "45", "46", "47", "48", "49", "50" ],
+  "settings-schema": "org.gnome.shell.extensions.climacn@outlook.com"
+}
