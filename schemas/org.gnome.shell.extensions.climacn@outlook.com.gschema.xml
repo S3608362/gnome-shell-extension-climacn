@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.climacn@outlook.com"
+          path="/org/gnome/shell/extensions/climacn@outlook.com/">
+    
+    <!-- API Key -->
+    <key name="api-key" type="s">
+      <default>''</default>
+      <summary>和风天气 API Key</summary>
+      <description>用于和风天气 API 的身份验证密钥。</description>
+    </key>
+    
+    <!-- API Base URL -->
+    <key name="api-base-url" type="s">
+      <default>'https://devapi.qweather.com'</default>
+      <summary>和风天气 API 基础 URL</summary>
+      <description>和风天气 API 的服务器地址。</description>
+    </key>
+    
+  </schema>
+</schemalist>
