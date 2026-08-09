@@ -12,6 +12,7 @@ ClimaCN 基于和风天气 API，内置全国城市数据库，支持自定义 A
 - ⚙️ 支持自定义 API Key 和 API 地址
 - 🎨 图标自动适配 GNOME 深色顶栏
 - ⏱️ 实时显示温度、体感温度、湿度、风向风力
+- 🔄 每 15 分钟自动刷新
 - 📅 **新增：未来三天逐日预报**（最高/最低温度、天气状况）
 
 ## 📦 安装方法
@@ -27,7 +28,7 @@ ClimaCN 基于和风天气 API，内置全国城市数据库，支持自定义 A
 4. 打开“扩展”应用，启用 ClimaCN，点击齿轮图标配置你的 API Key 和 API 地址
 
 ## 🔑 获取 API Key
-前往 [和风天气开发版](https://dev.qweather.com/) 注册免费账号即可获取。
+前往 [和风天气开发版](https://dev.qweather.com/)注册免费账号即可获取。
 
 ## 常见问题
 
@@ -35,7 +36,10 @@ Q: 图标全是黑色？
 A: 确保图标文件以 -symbolic.svg 结尾，GNOME 会自动适配。
 
 Q: API Key 填了但获取失败？
-A: 检查 API 地址是否正确（默认 https://devapi.qweather.com），并确认 API Key 有效。
+A: 检查 API 地址是否正确,默认：（https://dev.qweather.com/），并确认 API Key 有效。
+
+Q: 为什么点击刷新后的更新时间与当前时间不同步？
+A: 面板中的更新时间是指和风天气的数据源的更新时间。
 
 ## 🖼️ 图标版权
 天气图标来源于 [和风天气图标库](https://icons.qweather.com/)，采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。

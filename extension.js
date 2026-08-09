@@ -133,15 +133,20 @@ export default class ClimaCNExtension extends Extension {
 
     _createIndicator() {
         this._indicator = new PanelMenu.Button(0.0, 'ClimaCN', false);
-        const box = new St.BoxLayout({ style_class: 'climacn-indicator-box' });
+        const box = new St.BoxLayout({ 
+            style_class: 'climacn-indicator-box',
+            y_align: Clutter.ActorAlign.CENTER
+        });
         this._weatherIcon = new St.Icon({
             style_class: 'system-status-icon climacn-panel-icon',
-            icon_size: 18
+            icon_size: 18,
+            y_align: Clutter.ActorAlign.CENTER
         });
         box.add_child(this._weatherIcon);
         this._tempLabel = new St.Label({
             style_class: 'climacn-temperature',
-            text: '--°'
+            text: '--°',
+            y_align: Clutter.ActorAlign.CENTER
         });
         box.add_child(this._tempLabel);
         this._indicator.add_child(box);
@@ -154,7 +159,8 @@ export default class ClimaCNExtension extends Extension {
 
         this._cityLabel = new St.Label({
             text: this._currentCityName,
-            x_align: Clutter.ActorAlign.CENTER
+            x_align: Clutter.ActorAlign.CENTER,
+            style: 'font-weight: bold; font-size: 1.05em; padding: 4px 0px;'
         });
         const cityItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
         cityItem.add_child(this._cityLabel);
@@ -185,7 +191,7 @@ export default class ClimaCNExtension extends Extension {
             vertical: true
         });
         this._forecastTitle = new St.Label({
-            text: '📅 未来3天预报',
+            text: '📅 未来 3 天预报',
             style_class: 'climacn-forecast-title'
         });
         this._forecastContainer.add_child(this._forecastTitle);
@@ -213,14 +219,19 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _createDetailRow(parentBox, title, initialValue) {
-        const row = new St.BoxLayout({ style_class: 'climacn-detail-row' });
+        const row = new St.BoxLayout({ 
+            style_class: 'climacn-detail-row',
+            y_align: Clutter.ActorAlign.CENTER
+        });
         const titleLabel = new St.Label({
             text: `${title}:`,
-            style_class: 'climacn-detail-label'
+            style_class: 'climacn-detail-label',
+            y_align: Clutter.ActorAlign.CENTER
         });
         const valueLabel = new St.Label({
             text: initialValue,
-            style_class: 'climacn-detail-value'
+            style_class: 'climacn-detail-value',
+            y_align: Clutter.ActorAlign.CENTER
         });
         row.add_child(titleLabel);
         row.add_child(valueLabel);
@@ -390,7 +401,6 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _startAutoRefresh() {
-        // 修改点: 使用 GLib.timeout_add_seconds 替代 GLib.timeout_add_seconds，更省电
         this._timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, UPDATE_INTERVAL_SEC, () => {
             this._fetchWeather();
             return GLib.SOURCE_CONTINUE;
@@ -490,7 +500,7 @@ export default class ClimaCNExtension extends Extension {
         try {
             const file = Gio.File.new_for_path(filePath);
             if (file.query_exists(null)) {
-                // 修改点: 修正 Gio.FileIcon 的构造方式
+                // 修正：使用属性初始化对象
                 return new Gio.FileIcon({ file: file });
             }
         } catch (e) {
@@ -498,14 +508,11 @@ export default class ClimaCNExtension extends Extension {
         }
         return null;
     }
-
     _updateUI(now, forecast) {
         // ---- 当前天气 ----
         const iconCode = now.icon || '999';
         const temp = now.temp || '--';
         const iconPath = `${this.path}/icons/${iconCode}-symbolic.svg`;
-        
-        // 修改点: 使用辅助函数创建图标
         const icon = this._createFileIcon(iconPath);
         if (icon) {
             this._weatherIcon.gicon = icon;
@@ -531,30 +538,35 @@ export default class ClimaCNExtension extends Extension {
             const count = Math.min(forecast.length, 3);
             for (let i = 0; i < count; i++) {
                 const day = forecast[i];
-                const row = new St.BoxLayout({ style_class: 'climacn-forecast-row' });
+                const row = new St.BoxLayout({ 
+                    style_class: 'climacn-forecast-row',
+                    y_align: Clutter.ActorAlign.CENTER 
+                });
 
                 // 日期
                 const dayLabel = new St.Label({
                     text: dayNames[i] || day.fxDate.substring(5),
-                    style_class: 'climacn-forecast-day'
+                    style_class: 'climacn-forecast-day',
+                    y_align: Clutter.ActorAlign.CENTER
                 });
                 row.add_child(dayLabel);
 
                 // 天气图标（使用本地 SVG）
                 const iconCodeFore = day.iconDay || '999';
                 const iconPathFore = `${this.path}/icons/${iconCodeFore}-symbolic.svg`;
-                // 修改点: 使用辅助函数创建图标
                 const iconFore = this._createFileIcon(iconPathFore);
                 let iconWidget;
                 if (iconFore) {
                     iconWidget = new St.Icon({
                         gicon: iconFore,
-                        style_class: 'climacn-forecast-icon'
+                        style_class: 'climacn-forecast-icon',
+                        y_align: Clutter.ActorAlign.CENTER
                     });
                 } else {
                     iconWidget = new St.Icon({
                         icon_name: 'weather-severe-alert-symbolic',
-                        style_class: 'climacn-forecast-icon'
+                        style_class: 'climacn-forecast-icon',
+                        y_align: Clutter.ActorAlign.CENTER
                     });
                 }
                 row.add_child(iconWidget);
@@ -562,14 +574,16 @@ export default class ClimaCNExtension extends Extension {
                 // 温度范围
                 const tempLabel = new St.Label({
                     text: `${day.tempMin}°C / ${day.tempMax}°C`,
-                    style_class: 'climacn-forecast-temp'
+                    style_class: 'climacn-forecast-temp',
+                    y_align: Clutter.ActorAlign.CENTER
                 });
                 row.add_child(tempLabel);
 
                 // 天气状况
                 const conditionLabel = new St.Label({
                     text: day.textDay || '--',
-                    style_class: 'climacn-forecast-condition'
+                    style_class: 'climacn-forecast-condition',
+                    y_align: Clutter.ActorAlign.CENTER
                 });
                 row.add_child(conditionLabel);
 
