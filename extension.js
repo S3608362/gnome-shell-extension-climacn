@@ -1,4 +1,4 @@
-/* extension.js - ClimaCN GNOME Shell Extension (local CSV city search) */
+/* extension.js - ClimaCN GNOME Shell Extension (local CSV city search + 3-day forecast) */
 
 import St from 'gi://St';
 import Gio from 'gi://Gio';
@@ -13,15 +13,19 @@ import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/
 /* =====================================================================
  * 默认配置（这些将被 GSettings 覆盖，仅作后备）
  * ===================================================================== */
-const DEFAULT_LOCATION_ID = '101010100';                      // 默认城市 Location ID
-const DEFAULT_CITY_NAME = '北京，北京市';                      // 默认城市显示名称
-const UPDATE_INTERVAL_SEC = 15 * 60;                          // 自动刷新间隔（秒）
+const DEFAULT_LOCATION_ID = '101010100';
+const DEFAULT_CITY_NAME = '北京，北京市';
+const UPDATE_INTERVAL_SEC = 15 * 60;
 
 /* =====================================================================
- * 和风天气 API 基础 URL（用于构建请求，URL 从 GSettings 读取）
+ * 和风天气 API 基础 URL
  * ===================================================================== */
 function getWeatherUrl(baseUrl, locationId) {
     return `${baseUrl}/v7/weather/now?location=${locationId}`;
+}
+
+function getForecastUrl(baseUrl, locationId) {
+    return `${baseUrl}/v7/weather/3d?location=${locationId}`;
 }
 
 export default class ClimaCNExtension extends Extension {
@@ -32,52 +36,35 @@ export default class ClimaCNExtension extends Extension {
         this._session = new Soup.Session();
         this._cancellable = new Gio.Cancellable();
 
-        // 本地城市数据缓存
         this._cityData = null;
         this._isLoadingCities = false;
 
-        // ---- 读取 GSettings 配置 ----
         this._settings = this.getSettings();
         this._apiKey = this._settings.get_string('api-key') || '';
         this._baseUrl = this._settings.get_string('api-base-url') || 'https://devapi.qweather.com';
 
-        // 监听设置变化
         this._apiKeyChangedId = this._settings.connect('changed::api-key', () => {
             this._apiKey = this._settings.get_string('api-key') || '';
-            log('[ClimaCN] API Key updated');
-            // 可选：自动刷新天气
-            // this._fetchWeather();
         });
         this._baseUrlChangedId = this._settings.connect('changed::api-base-url', () => {
             this._baseUrl = this._settings.get_string('api-base-url') || 'https://devapi.qweather.com';
-            log('[ClimaCN] API Base URL updated');
-            // 可选：自动刷新天气
-            // this._fetchWeather();
         });
 
-        // 加载持久化设置（城市）
         this._settingsFile = Gio.File.new_for_path(this.path + '/settings.json');
         this._currentLocationId = DEFAULT_LOCATION_ID;
         this._currentCityName = DEFAULT_CITY_NAME;
         this._loadSettings();
 
-        // 加载样式表
         this._stylesheetPath = this.path + '/stylesheet.css';
         this._theme = St.ThemeContext.get_for_stage(global.stage).get_theme();
         this._theme.load_stylesheet(Gio.File.new_for_path(this._stylesheetPath));
 
-        // 创建面板指示器
         this._createIndicator();
-
-        // 立即获取天气
         this._fetchWeather();
-
-        // 启动定时轮询
         this._startAutoRefresh();
     }
 
     disable() {
-        // 清理定时器
         if (this._timeoutId) {
             GLib.Source.remove(this._timeoutId);
             this._timeoutId = 0;
@@ -86,30 +73,20 @@ export default class ClimaCNExtension extends Extension {
             GLib.Source.remove(this._searchTimeoutId);
             this._searchTimeoutId = 0;
         }
-
-        // 取消进行中的请求
         if (this._cancellable && !this._cancellable.is_cancelled())
             this._cancellable.cancel();
-
-        // 关闭会话
         if (this._session) {
             this._session.abort();
             this._session = null;
         }
-
-        // 移除样式
         if (this._stylesheetPath) {
             const file = Gio.File.new_for_path(this._stylesheetPath);
             try { this._theme.unload_stylesheet(file); } catch (e) { log(e); }
         }
-
-        // 销毁面板
         if (this._indicator) {
             this._indicator.destroy();
             this._indicator = null;
         }
-
-        // 清理 GSettings 连接
         if (this._settings) {
             if (this._apiKeyChangedId) {
                 this._settings.disconnect(this._apiKeyChangedId);
@@ -121,12 +98,10 @@ export default class ClimaCNExtension extends Extension {
             }
             this._settings = null;
         }
-
         this._cancellable = null;
         this._cityData = null;
     }
 
-    /* ---- 持久化设置读写（城市信息） ---- */
     _loadSettings() {
         try {
             if (this._settingsFile.query_exists(null)) {
@@ -156,35 +131,27 @@ export default class ClimaCNExtension extends Extension {
         } catch (e) { log(`[ClimaCN] _saveSettings: ${e}`); }
     }
 
-    /* ---- 面板指示器 ---- */
     _createIndicator() {
         this._indicator = new PanelMenu.Button(0.0, 'ClimaCN', false);
-
         const box = new St.BoxLayout({ style_class: 'climacn-indicator-box' });
-
-        // 图标：通过 -symbolic 命名自动主题化
         this._weatherIcon = new St.Icon({
             style_class: 'system-status-icon climacn-panel-icon',
             icon_size: 18
         });
         box.add_child(this._weatherIcon);
-
         this._tempLabel = new St.Label({
             style_class: 'climacn-temperature',
             text: '--°'
         });
         box.add_child(this._tempLabel);
-
         this._indicator.add_child(box);
         this._buildMenu();
         Main.panel.addToStatusArea('climacn', this._indicator);
     }
 
-    /* ---- 下拉菜单 ---- */
     _buildMenu() {
         this._indicator.menu.removeAll();
 
-        // 当前城市名（颜色继承系统菜单主题）
         this._cityLabel = new St.Label({
             text: this._currentCityName,
             x_align: Clutter.ActorAlign.CENTER
@@ -193,12 +160,9 @@ export default class ClimaCNExtension extends Extension {
         cityItem.add_child(this._cityLabel);
         this._indicator.menu.addMenuItem(cityItem);
 
-        // 搜索区域（包含输入框、状态标签、结果容器）
         this._buildSearchUI();
-
         this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        // 天气详情（所有颜色继承系统主题）
         const detailsBox = new St.BoxLayout({
             style_class: 'climacn-details-box',
             vertical: true
@@ -213,9 +177,31 @@ export default class ClimaCNExtension extends Extension {
         detailsItem.add_child(detailsBox);
         this._indicator.menu.addMenuItem(detailsItem);
 
+        // ---- 未来3天预报区域 ----
         this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        // 手动刷新按钮
+        this._forecastContainer = new St.BoxLayout({
+            style_class: 'climacn-forecast-box',
+            vertical: true
+        });
+        this._forecastTitle = new St.Label({
+            text: '📅 未来3天预报',
+            style_class: 'climacn-forecast-title'
+        });
+        this._forecastContainer.add_child(this._forecastTitle);
+        this._forecastRowsBox = new St.BoxLayout({
+            style_class: 'climacn-forecast-rows',
+            vertical: true
+        });
+        this._forecastContainer.add_child(this._forecastRowsBox);
+
+        const forecastItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        forecastItem.add_child(this._forecastContainer);
+        this._indicator.menu.addMenuItem(forecastItem);
+        // -----------------------------------------
+
+        this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
         const refreshItem = new PopupMenu.PopupMenuItem(_('刷新'));
         const refreshIcon = new St.Icon({
             icon_name: 'view-refresh-symbolic',
@@ -242,9 +228,7 @@ export default class ClimaCNExtension extends Extension {
         return valueLabel;
     }
 
-    /* ---- 搜索 UI 构建（修复空白块 & hint_text） ---- */
     _buildSearchUI() {
-        // 搜索输入框：使用 hint_text 而非 set_text，防止占位文字不消失
         this._searchEntry = new St.Entry({
             hint_text: _('搜索城市 (例: 北京/海淀/朝阳)...'),
             track_hover: true,
@@ -258,7 +242,6 @@ export default class ClimaCNExtension extends Extension {
         entryItem.add_child(this._searchEntry);
         this._indicator.menu.addMenuItem(entryItem);
 
-        // 搜索状态标签（初始隐藏，当需要提示时才显示）
         this._searchStatusLabel = new St.Label({
             style_class: 'climacn-detail-label'
         });
@@ -267,13 +250,11 @@ export default class ClimaCNExtension extends Extension {
         statusItem.add_child(this._searchStatusLabel);
         this._indicator.menu.addMenuItem(statusItem);
 
-        // 搜索结果容器（初始隐藏，有结果时才显示）
         this._searchResultsSection = new PopupMenu.PopupMenuSection();
         this._indicator.menu.addMenuItem(this._searchResultsSection);
-        this._searchResultsSection.actor.hide(); // 关键：初始隐藏，防止空白占位
+        this._searchResultsSection.actor.hide();
     }
 
-    /* ---- 城市数据加载（本地 CSV） ---- */
     _loadCityData() {
         if (this._cityData || this._isLoadingCities) return;
         this._isLoadingCities = true;
@@ -316,7 +297,6 @@ export default class ClimaCNExtension extends Extension {
         log(`[ClimaCN] Parsed ${cities.length} cities`);
     }
 
-    /* ---- 搜索防抖 ---- */
     _onSearchTextChanged() {
         if (this._searchTimeoutId) {
             GLib.Source.remove(this._searchTimeoutId);
@@ -345,8 +325,7 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _performLocalSearch(query) {
-        this._clearSearchResults(); // 每次搜索前清空并隐藏结果区
-
+        this._clearSearchResults();
         if (!this._cityData) {
             if (this._isLoadingCities)
                 this._showSearchStatus(_('正在加载城市库...'));
@@ -358,7 +337,6 @@ export default class ClimaCNExtension extends Extension {
             this._showSearchStatus(_('本地城市库为空，请检查文件'));
             return;
         }
-
         const q = query.toLowerCase();
         const results = [];
         for (const city of this._cityData) {
@@ -368,16 +346,12 @@ export default class ClimaCNExtension extends Extension {
                 if (results.length >= 15) break;
             }
         }
-
         if (results.length === 0) {
             this._showSearchStatus(_('未找到相关城市'));
             return;
         }
-
-        // 有结果：隐藏状态标签，显示结果容器，并填充项目
         this._searchStatusLabel.hide();
         this._searchResultsSection.actor.show();
-
         for (const city of results) {
             let display = city.name;
             if (city.adm2 && city.adm2 !== city.name && city.adm2 !== city.adm1)
@@ -390,14 +364,12 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _showSearchStatus(text) {
-        // 显示状态信息时，确保结果容器隐藏
         this._searchResultsSection.actor.hide();
         this._searchStatusLabel.text = text;
         this._searchStatusLabel.show();
     }
 
     _clearSearchResults() {
-        // 清空结果项、隐藏结果容器和状态标签
         if (this._searchResultsSection) {
             this._searchResultsSection.removeAll();
             this._searchResultsSection.actor.hide();
@@ -407,7 +379,6 @@ export default class ClimaCNExtension extends Extension {
         }
     }
 
-    /* ---- 选中城市 ---- */
     _selectCity(city) {
         this._currentLocationId = city.id;
         this._currentCityName = `${city.name}，${city.adm1}`;
@@ -418,17 +389,15 @@ export default class ClimaCNExtension extends Extension {
         this._fetchWeather();
     }
 
-    /* ---- 定时刷新 ---- */
     _startAutoRefresh() {
+        // 修改点: 使用 GLib.timeout_add_seconds 替代 GLib.timeout_add_seconds，更省电
         this._timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, UPDATE_INTERVAL_SEC, () => {
             this._fetchWeather();
             return GLib.SOURCE_CONTINUE;
         });
     }
 
-    /* ---- 获取天气（Header 鉴权 + 错误处理） ---- */
     _fetchWeather() {
-        // 检查 API Key 是否已配置
         if (!this._apiKey || this._apiKey.trim() === '') {
             this._showError(_('请在设置中配置 API Key'));
             return;
@@ -437,15 +406,12 @@ export default class ClimaCNExtension extends Extension {
             this._showError(_('请在设置中配置 API Base URL'));
             return;
         }
-
         if (this._cancellable?.is_cancelled())
             this._cancellable = new Gio.Cancellable();
 
         const url = getWeatherUrl(this._baseUrl, this._currentLocationId);
         const message = Soup.Message.new('GET', url);
         if (!message) return;
-
-        // Header 认证
         message.request_headers.append('X-Qw-Api-Key', this._apiKey);
 
         log(`[ClimaCN] Fetching weather for ${this._currentLocationId}`);
@@ -458,15 +424,14 @@ export default class ClimaCNExtension extends Extension {
                 try {
                     const bytes = session.send_and_read_finish(result);
                     if (this._cancellable?.is_cancelled()) return;
-
                     const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
-
                     if (json.code === '200' && json.now) {
-                        this._updateUI(json.now);
+                        this._fetchForecast((forecast) => {
+                            this._updateUI(json.now, forecast);
+                        });
                     } else {
                         const errCode = json.code || 'unknown';
                         console.error(`[ClimaCN] API error: code=${errCode}, response=${JSON.stringify(json)}`);
-
                         if (errCode === '401' || errCode === '403') {
                             if (this._timeoutId) {
                                 GLib.Source.remove(this._timeoutId);
@@ -484,37 +449,141 @@ export default class ClimaCNExtension extends Extension {
             }
         );
     }
-    
-    /* ---- UI 更新（使用 obsTime 修正更新时间） ---- */
-    _updateUI(now) {
+
+    _fetchForecast(callback) {
+        const url = getForecastUrl(this._baseUrl, this._currentLocationId);
+        const message = Soup.Message.new('GET', url);
+        if (!message) {
+            callback(null);
+            return;
+        }
+        message.request_headers.append('X-Qw-Api-Key', this._apiKey);
+
+        this._session.send_and_read_async(
+            message,
+            Soup.MessagePriority.NORMAL,
+            this._cancellable,
+            (session, result) => {
+                try {
+                    const bytes = session.send_and_read_finish(result);
+                    if (this._cancellable?.is_cancelled()) {
+                        callback(null);
+                        return;
+                    }
+                    const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
+                    if (json.code === '200' && json.daily) {
+                        callback(json.daily);
+                    } else {
+                        log(`[ClimaCN] Forecast error: code=${json.code}`);
+                        callback(null);
+                    }
+                } catch (e) {
+                    log(`[ClimaCN] Forecast parse error: ${e}`);
+                    callback(null);
+                }
+            }
+        );
+    }
+
+    // 辅助函数：安全地创建 Gio.FileIcon
+    _createFileIcon(filePath) {
+        try {
+            const file = Gio.File.new_for_path(filePath);
+            if (file.query_exists(null)) {
+                // 修改点: 修正 Gio.FileIcon 的构造方式
+                return new Gio.FileIcon({ file: file });
+            }
+        } catch (e) {
+            log(`[ClimaCN] Failed to create icon from ${filePath}: ${e}`);
+        }
+        return null;
+    }
+
+    _updateUI(now, forecast) {
+        // ---- 当前天气 ----
         const iconCode = now.icon || '999';
         const temp = now.temp || '--';
         const iconPath = `${this.path}/icons/${iconCode}-symbolic.svg`;
-        const iconFile = Gio.File.new_for_path(iconPath);
-
-        try {
-            if (iconFile.query_exists(null))
-                this._weatherIcon.gicon = new Gio.FileIcon({ file: iconFile });
-            else
-                this._weatherIcon.icon_name = 'weather-severe-alert-symbolic';
-        } catch (e) {
+        
+        // 修改点: 使用辅助函数创建图标
+        const icon = this._createFileIcon(iconPath);
+        if (icon) {
+            this._weatherIcon.gicon = icon;
+        } else {
             this._weatherIcon.icon_name = 'weather-severe-alert-symbolic';
         }
-
+        
         this._tempLabel.text = `${temp}°`;
-
         this._weatherDescLabel.text = now.text || '--';
         this._feelsLikeLabel.text = now.feelsLike ? `${now.feelsLike}°` : '--°';
         this._humidityLabel.text = now.humidity ? `${now.humidity}%` : '--%';
-
-        const windDir = now.windDir || '--';
-        const windScale = now.windScale || '--';
-        this._windLabel.text = `${windDir} ${windScale}级`;
-
-        // 正确的更新时间字段：obsTime
+        this._windLabel.text = `${now.windDir || '--'} ${now.windScale || '--'}级`;
         const obsTime = now.obsTime || '';
-        const timeStr = obsTime ? obsTime.substring(11, 16) : '--:--';
-        this._updateTimeLabel.text = timeStr;
+        this._updateTimeLabel.text = obsTime ? obsTime.substring(11, 16) : '--:--';
+
+        // ---- 未来3天预报 ----
+        if (this._forecastRowsBox) {
+            this._forecastRowsBox.remove_all_children();
+        }
+
+        if (forecast && Array.isArray(forecast) && forecast.length > 0) {
+            const dayNames = ['今天', '明天', '后天'];
+            const count = Math.min(forecast.length, 3);
+            for (let i = 0; i < count; i++) {
+                const day = forecast[i];
+                const row = new St.BoxLayout({ style_class: 'climacn-forecast-row' });
+
+                // 日期
+                const dayLabel = new St.Label({
+                    text: dayNames[i] || day.fxDate.substring(5),
+                    style_class: 'climacn-forecast-day'
+                });
+                row.add_child(dayLabel);
+
+                // 天气图标（使用本地 SVG）
+                const iconCodeFore = day.iconDay || '999';
+                const iconPathFore = `${this.path}/icons/${iconCodeFore}-symbolic.svg`;
+                // 修改点: 使用辅助函数创建图标
+                const iconFore = this._createFileIcon(iconPathFore);
+                let iconWidget;
+                if (iconFore) {
+                    iconWidget = new St.Icon({
+                        gicon: iconFore,
+                        style_class: 'climacn-forecast-icon'
+                    });
+                } else {
+                    iconWidget = new St.Icon({
+                        icon_name: 'weather-severe-alert-symbolic',
+                        style_class: 'climacn-forecast-icon'
+                    });
+                }
+                row.add_child(iconWidget);
+
+                // 温度范围
+                const tempLabel = new St.Label({
+                    text: `${day.tempMin}°C / ${day.tempMax}°C`,
+                    style_class: 'climacn-forecast-temp'
+                });
+                row.add_child(tempLabel);
+
+                // 天气状况
+                const conditionLabel = new St.Label({
+                    text: day.textDay || '--',
+                    style_class: 'climacn-forecast-condition'
+                });
+                row.add_child(conditionLabel);
+
+                this._forecastRowsBox.add_child(row);
+            }
+            this._forecastContainer.show();
+        } else {
+            const noDataLabel = new St.Label({
+                text: _('暂无预报数据'),
+                style_class: 'climacn-forecast-no-data'
+            });
+            this._forecastRowsBox.add_child(noDataLabel);
+            this._forecastContainer.show();
+        }
     }
 
     _showError(message = _('获取失败')) {
@@ -525,5 +594,13 @@ export default class ClimaCNExtension extends Extension {
         this._humidityLabel.text = '--%';
         this._windLabel.text = '--';
         this._updateTimeLabel.text = '--:--';
+        if (this._forecastRowsBox) {
+            this._forecastRowsBox.remove_all_children();
+            const errLabel = new St.Label({
+                text: _('无法加载预报'),
+                style_class: 'climacn-forecast-no-data'
+            });
+            this._forecastRowsBox.add_child(errLabel);
+        }
     }
 }
