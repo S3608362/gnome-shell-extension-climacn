@@ -35,7 +35,7 @@ Q: 图标全是黑色？
 A: 确保图标文件以 -symbolic.svg 结尾，GNOME 会自动适配。
 
 Q: API Key 填了但获取失败？
-A: 检查 API 地址是否正确（默认 https://devapi.qweather.com），并确认 API Key 有效。
+A: 检查 API 地址是否正确（默认：https://devapi.qweather.com/），并确认 API Key 有效。
 
 ## 🖼️ 图标版权
 天气图标来源于 [和风天气图标库](https://icons.qweather.com/)，采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。
