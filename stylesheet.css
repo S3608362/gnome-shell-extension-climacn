@@ -3,9 +3,9 @@
   spacing: 4px;
 }
 
-/* 顶栏天气图标：反转颜色（黑变白），解决黑色顶栏隐形问题 */
+/* 顶栏天气图标 */
 .climacn-panel-icon {
-  /* 如果需要调整图标大小，保留 icon-size 即可 */
+  /* 图标大小由 icon_size 在 JS 中指定 */
 }
 
 /* 温度标签 */
@@ -45,4 +45,48 @@
 .climacn-search-entry {
   padding: 4px 8px;
   font-size: 0.95em;
+}
+
+/* ---------- 未来3天预报样式 ---------- */
+.climacn-forecast-box {
+  padding: 8px 16px;
+  spacing: 4px;
+}
+
+.climacn-forecast-title {
+  font-weight: bold;
+  font-size: 1em;
+  margin-bottom: 4px;
+}
+
+.climacn-forecast-rows {
+  spacing: 4px;
+}
+
+.climacn-forecast-row {
+  spacing: 10px;
+}
+
+.climacn-forecast-day {
+  font-size: 0.9em;
+  width: 50px;
+}
+
+.climacn-forecast-icon {
+  icon-size: 18px;
+}
+
+.climacn-forecast-temp {
+  font-size: 0.9em;
+  font-weight: bold;
+}
+
+.climacn-forecast-condition {
+  font-size: 0.9em;
+  color: #8b8b8b;
+}
+
+.climacn-forecast-no-data {
+  font-size: 0.9em;
+  color: #8b8b8b;
 }
