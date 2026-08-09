@@ -18,7 +18,7 @@
    glib-compile-schemas schemas/
    ```
 3. 重启 GNOME Shell（按 `Alt+F2`，输入 `r`，回车）
-4. 打开“扩展”应用，启用 ClimaCN，点击齿轮图标配置你的 API Key
+4. 打开“扩展”应用，启用 ClimaCN，点击齿轮图标配置你的 API Key 和 API 地址
 
 ## 🔑 获取 API Key
 前往 [和风天气开发版](https://dev.qweather.com/) 注册免费账号即可获取。
