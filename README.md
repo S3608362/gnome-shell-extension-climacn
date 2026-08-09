@@ -1,7 +1,7 @@
 # ClimaCN - 中国天气 GNOME Shell 扩展
 
 ![License](https://img.shields.io/github/license/S3608362/gnome-shell-extension-climacn)
-![GitHub Release](https://img.shields.io/github/v/release/S3608362/gnome-shell-extension-climacn)
+![GitHub Release](https://img.shields.io/github/v1/release/S3608362/gnome-shell-extension-climacn)
 ![Top Language](https://img.shields.io/github/languages/top/S3608362/gnome-shell-extension-climacn)
 
 **国内 GNOME 用户一直缺少一个精准的天气扩展。**  
