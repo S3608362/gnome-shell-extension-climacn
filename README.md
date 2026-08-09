@@ -2,6 +2,7 @@
 
 ![License](https://img.shields.io/github/license/S3608362/gnome-shell-extension-climacn)
 ![Top Language](https://img.shields.io/github/languages/top/S3608362/gnome-shell-extension-climacn)
+![GitHub Release](https://img.shields.io/github/v/release/S3608362/gnome-shell-extension-climacn)
 
 **国内 GNOME 用户一直缺少一个精准的天气扩展。**  
 ClimaCN 基于和风天气 API，内置全国城市数据库，支持自定义 API 地址，图标完美适配深色顶栏。
