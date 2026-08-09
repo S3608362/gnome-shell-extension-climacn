@@ -1,92 +1,109 @@
-/* 顶栏指示器布局 */
+/* ---------------------------------------------------------------------
+ * 顶栏 indicator 样式
+ * --------------------------------------------------------------------- */
 .climacn-indicator-box {
-  spacing: 4px;
+  spacing: 6px;
 }
 
-/* 顶栏天气图标 */
 .climacn-panel-icon {
   /* 图标大小由 icon_size 在 JS 中指定 */
 }
 
-/* 温度标签 */
 .climacn-temperature {
   font-weight: bold;
+  font-size: 0.95em;
+}
+
+/* ---------------------------------------------------------------------
+ * 城市搜索框样式
+ * --------------------------------------------------------------------- */
+.climacn-search-entry {
+  padding: 6px 12px;
   font-size: 0.9em;
+  border-radius: 8px;
+  margin: 4px 8px;
 }
 
-/* 下拉菜单详情区域 */
+/* ---------------------------------------------------------------------
+ * 详情区域（当前天气详细数据）
+ * --------------------------------------------------------------------- */
 .climacn-details-box {
-  padding: 8px 16px;
-  spacing: 6px;
-}
-
-/* 详情行布局 */
-.climacn-detail-row {
+  padding: 8px 12px;
   spacing: 8px;
 }
 
-/* 详情标签文字（标题） */
-.climacn-detail-label {
-  font-size: 0.95em;
+.climacn-detail-row {
+  spacing: 12px;
 }
 
-/* 详情数值文字 */
+/* 固定标签宽度，解决冒号与右侧数值无法对齐的问题 */
+.climacn-detail-label {
+  font-size: 0.9em;
+  width: 80px;
+  text-align: left;
+  opacity: 0.8;
+}
+
 .climacn-detail-value {
-  font-size: 0.95em;
+  font-size: 0.9em;
   font-weight: bold;
 }
 
-/* 刷新按钮图标 */
-.climacn-refresh-icon {
-  icon-size: 14px;
-}
-
-/* 城市搜索输入框 */
-.climacn-search-entry {
-  padding: 4px 8px;
-  font-size: 0.95em;
-}
-
-/* ---------- 未来3天预报样式 ---------- */
+/* ---------------------------------------------------------------------
+ * 未来 3 天预报区域
+ * --------------------------------------------------------------------- */
 .climacn-forecast-box {
-  padding: 8px 16px;
-  spacing: 4px;
+  padding: 8px 12px;
+  spacing: 8px;
 }
 
 .climacn-forecast-title {
   font-weight: bold;
-  font-size: 1em;
-  margin-bottom: 4px;
+  font-size: 0.95em;
+  margin-bottom: 6px;
+  opacity: 0.9;
 }
 
 .climacn-forecast-rows {
-  spacing: 4px;
+  spacing: 6px;
 }
 
 .climacn-forecast-row {
-  spacing: 10px;
+  spacing: 12px;
 }
 
+/* 1. 日期 fixed 宽度对齐 */
 .climacn-forecast-day {
   font-size: 0.9em;
-  width: 50px;
+  width: 48px;
+  opacity: 0.8;
 }
 
 .climacn-forecast-icon {
   icon-size: 18px;
 }
 
+/* 2. 温度范围 fixed 宽度对齐，避免因字符数变化导致右侧状况文字错位 */
 .climacn-forecast-temp {
   font-size: 0.9em;
   font-weight: bold;
+  width: 100px;
+  text-align: left;
 }
 
 .climacn-forecast-condition {
-  font-size: 0.9em;
-  color: #8b8b8b;
+  font-size: 0.85em;
+  opacity: 0.7;
 }
 
 .climacn-forecast-no-data {
-  font-size: 0.9em;
-  color: #8b8b8b;
+  font-size: 0.85em;
+  opacity: 0.6;
+}
+
+/* ---------------------------------------------------------------------
+ * 底部操作栏（刷新按钮等）
+ * --------------------------------------------------------------------- */
+.climacn-refresh-icon {
+  icon-size: 14px;
 }
