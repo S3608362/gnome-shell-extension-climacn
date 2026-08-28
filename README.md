@@ -36,7 +36,7 @@ Q: 图标全是黑色？
 A: 确保图标文件以 -symbolic.svg 结尾，GNOME 会自动适配。
 
 Q: API Key 填了但获取失败？
-A: 检查 API 地址是否正确,默认：（https://dev.qweather.com/），并确认 API Key 有效。
+A: 检查 API 地址是否正确,[默认API](https://dev.qweather.com/)，并确认 API Key 有效。
 
 Q: 为什么点击刷新后的更新时间与当前时间不同步？
 A: 面板中的更新时间是指和风天气的数据源的更新时间。
