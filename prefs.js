@@ -7,10 +7,8 @@ import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/
 
 export default class ClimaCNPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
-        // 获取 GSettings 对象
         const settings = this.getSettings();
 
-        // 创建一个新的设置页面
         const page = new Adw.PreferencesPage({
             title: 'ClimaCN 设置',
             icon_name: 'weather-clear-symbolic',
@@ -20,11 +18,10 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
         // --- API 设置分组 ---
         const apiGroup = new Adw.PreferencesGroup({
             title: 'API 设置',
-            description: '配置和风天气 API',
+            description: '配置和风天气 API（Key 与 Base URL 可在和风天气控制台获取）',
         });
         page.add(apiGroup);
 
-        // API Key 输入行
         const apiKeyRow = new Adw.EntryRow({
             title: 'API Key',
             text: settings.get_string('api-key') || '',
@@ -34,7 +31,6 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
         });
         apiGroup.add(apiKeyRow);
 
-        // API Base URL 输入行
         const apiUrlRow = new Adw.EntryRow({
             title: 'API Base URL',
             text: settings.get_string('api-base-url') || '',
@@ -43,5 +39,12 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
             settings.set_string('api-base-url', widget.text);
         });
         apiGroup.add(apiUrlRow);
+
+        // --- 说明分组 ---
+        const infoGroup = new Adw.PreferencesGroup({
+            title: '说明',
+            description: '城市搜索使用本地数据库（data/China-City-List-latest.csv），图标使用本地 SVG，无需额外配置。',
+        });
+        page.add(infoGroup);
     }
 }

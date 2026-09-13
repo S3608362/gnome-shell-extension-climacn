@@ -2,20 +2,34 @@
 <schemalist>
   <schema id="org.gnome.shell.extensions.climacn@outlook.com"
           path="/org/gnome/shell/extensions/climacn@outlook.com/">
-    
+
     <!-- API Key -->
     <key name="api-key" type="s">
       <default>''</default>
       <summary>和风天气 API Key</summary>
       <description>用于和风天气 API 的身份验证密钥。</description>
     </key>
-    
+
     <!-- API Base URL -->
     <key name="api-base-url" type="s">
       <default>'https://devapi.qweather.com'</default>
       <summary>和风天气 API 基础 URL</summary>
       <description>和风天气 API 的服务器地址。</description>
     </key>
-    
+
+    <!-- 当前城市 Location ID -->
+    <key name="location-id" type="s">
+      <default>'101010100'</default>
+      <summary>当前城市的 Location ID</summary>
+      <description>和风天气城市代码，用于查询当前天气与预报。</description>
+    </key>
+
+    <!-- 当前城市显示名 -->
+    <key name="city-name" type="s">
+      <default>'北京，北京市'</default>
+      <summary>当前城市显示名称</summary>
+      <description>显示在菜单顶部的城市名称。</description>
+    </key>
+
   </schema>
 </schemalist>

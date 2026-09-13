@@ -11,10 +11,8 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 /* =====================================================================
- * 默认配置（这些将被 GSettings 覆盖，仅作后备）
+ * 常量
  * ===================================================================== */
-const DEFAULT_LOCATION_ID = '101010100';
-const DEFAULT_CITY_NAME = '北京，北京市';
 const UPDATE_INTERVAL_SEC = 15 * 60;
 
 /* =====================================================================
@@ -33,6 +31,8 @@ export default class ClimaCNExtension extends Extension {
         this._indicator = null;
         this._timeoutId = 0;
         this._searchTimeoutId = 0;
+        this._searchActivateId = 0;
+        this._searchTextChangedId = 0;
         this._session = new Soup.Session();
         this._cancellable = new Gio.Cancellable();
 
@@ -43,17 +43,16 @@ export default class ClimaCNExtension extends Extension {
         this._apiKey = this._settings.get_string('api-key') || '';
         this._baseUrl = this._settings.get_string('api-base-url') || 'https://devapi.qweather.com';
 
+        // 当前城市：默认值由 GSettings schema 提供，代码中不再硬编码
+        this._currentLocationId = this._settings.get_string('location-id');
+        this._currentCityName = this._settings.get_string('city-name');
+
         this._apiKeyChangedId = this._settings.connect('changed::api-key', () => {
             this._apiKey = this._settings.get_string('api-key') || '';
         });
         this._baseUrlChangedId = this._settings.connect('changed::api-base-url', () => {
             this._baseUrl = this._settings.get_string('api-base-url') || 'https://devapi.qweather.com';
         });
-
-        this._settingsFile = Gio.File.new_for_path(this.path + '/settings.json');
-        this._currentLocationId = DEFAULT_LOCATION_ID;
-        this._currentCityName = DEFAULT_CITY_NAME;
-        this._loadSettings();
 
         this._stylesheetPath = this.path + '/stylesheet.css';
         this._theme = St.ThemeContext.get_for_stage(global.stage).get_theme();
@@ -73,15 +72,29 @@ export default class ClimaCNExtension extends Extension {
             GLib.Source.remove(this._searchTimeoutId);
             this._searchTimeoutId = 0;
         }
+
+        // 信号必须在 actor 销毁前断开：destroy() 之后 clutter_text 已不可访问
+        if (this._searchEntry) {
+            const clutterText = this._searchEntry.clutter_text;
+            if (this._searchActivateId) {
+                clutterText.disconnect(this._searchActivateId);
+                this._searchActivateId = 0;
+            }
+            if (this._searchTextChangedId) {
+                clutterText.disconnect(this._searchTextChangedId);
+                this._searchTextChangedId = 0;
+            }
+        }
+
         if (this._cancellable && !this._cancellable.is_cancelled())
             this._cancellable.cancel();
         if (this._session) {
             this._session.abort();
             this._session = null;
         }
-        if (this._stylesheetPath) {
+        if (this._stylesheetPath && this._theme) {
             const file = Gio.File.new_for_path(this._stylesheetPath);
-            try { this._theme.unload_stylesheet(file); } catch (e) { log(e); }
+            try { this._theme.unload_stylesheet(file); } catch (e) { console.error(`[ClimaCN] ${e}`); }
         }
         if (this._indicator) {
             this._indicator.destroy();
@@ -98,42 +111,38 @@ export default class ClimaCNExtension extends Extension {
             }
             this._settings = null;
         }
-        this._cancellable = null;
+
+        // 释放全部 UI 引用，避免反复 enable/disable 后残留 actor 导致内存泄漏
+        this._weatherIcon = null;
+        this._tempLabel = null;
+        this._cityLabel = null;
+        this._weatherDescLabel = null;
+        this._feelsLikeLabel = null;
+        this._humidityLabel = null;
+        this._windLabel = null;
+        this._updateTimeLabel = null;
+        this._forecastContainer = null;
+        this._forecastTitle = null;
+        this._forecastRowsBox = null;
+        this._searchEntry = null;
+        this._searchStatusLabel = null;
+        this._searchResultsSection = null;
+
+        // 释放状态数据
         this._cityData = null;
-    }
-
-    _loadSettings() {
-        try {
-            if (this._settingsFile.query_exists(null)) {
-                const [success, contents] = this._settingsFile.load_contents(null);
-                if (success) {
-                    const data = JSON.parse(new TextDecoder().decode(contents));
-                    if (data.locationId) this._currentLocationId = data.locationId;
-                    if (data.cityName) this._currentCityName = data.cityName;
-                }
-            }
-        } catch (e) { log(`[ClimaCN] _loadSettings: ${e}`); }
-    }
-
-    _saveSettings() {
-        try {
-            const data = JSON.stringify({
-                locationId: this._currentLocationId,
-                cityName: this._currentCityName
-            });
-            this._settingsFile.replace_contents(
-                new TextEncoder().encode(data),
-                null,
-                false,
-                Gio.FileCreateFlags.REPLACE_DESTINATION,
-                null
-            );
-        } catch (e) { log(`[ClimaCN] _saveSettings: ${e}`); }
+        this._isLoadingCities = false;
+        this._apiKey = null;
+        this._baseUrl = null;
+        this._currentLocationId = null;
+        this._currentCityName = null;
+        this._stylesheetPath = null;
+        this._theme = null;
+        this._cancellable = null;
     }
 
     _createIndicator() {
         this._indicator = new PanelMenu.Button(0.0, 'ClimaCN', false);
-        const box = new St.BoxLayout({ 
+        const box = new St.BoxLayout({
             style_class: 'climacn-indicator-box',
             y_align: Clutter.ActorAlign.CENTER
         });
@@ -219,7 +228,7 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _createDetailRow(parentBox, title, initialValue) {
-        const row = new St.BoxLayout({ 
+        const row = new St.BoxLayout({
             style_class: 'climacn-detail-row',
             y_align: Clutter.ActorAlign.CENTER
         });
@@ -246,8 +255,8 @@ export default class ClimaCNExtension extends Extension {
             can_focus: true,
             style_class: 'climacn-search-entry'
         });
-        this._searchEntry.clutter_text.connect('activate', () => this._onSearchActivate());
-        this._searchEntry.clutter_text.connect('text-changed', () => this._onSearchTextChanged());
+        this._searchActivateId = this._searchEntry.clutter_text.connect('activate', () => this._onSearchActivate());
+        this._searchTextChangedId = this._searchEntry.clutter_text.connect('text-changed', () => this._onSearchTextChanged());
 
         const entryItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
         entryItem.add_child(this._searchEntry);
@@ -271,14 +280,15 @@ export default class ClimaCNExtension extends Extension {
         this._isLoadingCities = true;
         const csvFile = Gio.File.new_for_path(`${this.path}/data/China-City-List-latest.csv`);
         csvFile.load_contents_async(null, (file, result) => {
+            // disable() 已执行：_session 被置空，此时 UI 引用已释放，不可再触碰
+            if (!this._session) return;
             try {
                 const [success, contents] = file.load_contents_finish(result);
                 if (!success) throw new Error('load failed');
                 this._parseCSV(new TextDecoder().decode(contents));
                 this._isLoadingCities = false;
-                log('[ClimaCN] City data loaded successfully');
             } catch (e) {
-                log(`[ClimaCN] Failed to load city data: ${e}`);
+                console.error(`[ClimaCN] Failed to load city data: ${e}`);
                 this._cityData = [];
                 this._isLoadingCities = false;
                 this._showSearchStatus(_('本地城市库加载失败，请检查文件路径'));
@@ -305,7 +315,6 @@ export default class ClimaCNExtension extends Extension {
             if (id && name && adm1) cities.push({ id, name, adm1, adm2 });
         }
         this._cityData = cities;
-        log(`[ClimaCN] Parsed ${cities.length} cities`);
     }
 
     _onSearchTextChanged() {
@@ -394,7 +403,8 @@ export default class ClimaCNExtension extends Extension {
         this._currentLocationId = city.id;
         this._currentCityName = `${city.name}，${city.adm1}`;
         this._cityLabel.text = this._currentCityName;
-        this._saveSettings();
+        this._settings.set_string('location-id', this._currentLocationId);
+        this._settings.set_string('city-name', this._currentCityName);
         this._searchEntry.text = '';
         this._clearSearchResults();
         this._fetchWeather();
@@ -416,15 +426,13 @@ export default class ClimaCNExtension extends Extension {
             this._showError(_('请在设置中配置 API Base URL'));
             return;
         }
-        if (this._cancellable?.is_cancelled())
+        if (!this._cancellable || this._cancellable.is_cancelled())
             this._cancellable = new Gio.Cancellable();
 
         const url = getWeatherUrl(this._baseUrl, this._currentLocationId);
         const message = Soup.Message.new('GET', url);
         if (!message) return;
         message.request_headers.append('X-Qw-Api-Key', this._apiKey);
-
-        log(`[ClimaCN] Fetching weather for ${this._currentLocationId}`);
 
         this._session.send_and_read_async(
             message,
@@ -433,7 +441,8 @@ export default class ClimaCNExtension extends Extension {
             (session, result) => {
                 try {
                     const bytes = session.send_and_read_finish(result);
-                    if (this._cancellable?.is_cancelled()) return;
+                    // _cancellable 为 null 表示 disable() 已执行，此时 UI 引用已释放
+                    if (!this._cancellable || this._cancellable.is_cancelled()) return;
                     const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
                     if (json.code === '200' && json.now) {
                         this._fetchForecast((forecast) => {
@@ -453,6 +462,7 @@ export default class ClimaCNExtension extends Extension {
                         }
                     }
                 } catch (e) {
+                    if (!this._cancellable) return;
                     console.error(`[ClimaCN] Network/parse error: ${e}`);
                     this._showError();
                 }
@@ -476,7 +486,7 @@ export default class ClimaCNExtension extends Extension {
             (session, result) => {
                 try {
                     const bytes = session.send_and_read_finish(result);
-                    if (this._cancellable?.is_cancelled()) {
+                    if (!this._cancellable || this._cancellable.is_cancelled()) {
                         callback(null);
                         return;
                     }
@@ -484,11 +494,12 @@ export default class ClimaCNExtension extends Extension {
                     if (json.code === '200' && json.daily) {
                         callback(json.daily);
                     } else {
-                        log(`[ClimaCN] Forecast error: code=${json.code}`);
+                        console.error(`[ClimaCN] Forecast error: code=${json.code}`);
                         callback(null);
                     }
                 } catch (e) {
-                    log(`[ClimaCN] Forecast parse error: ${e}`);
+                    if (!this._cancellable) return;
+                    console.error(`[ClimaCN] Forecast parse error: ${e}`);
                     callback(null);
                 }
             }
@@ -504,7 +515,7 @@ export default class ClimaCNExtension extends Extension {
                 return new Gio.FileIcon({ file: file });
             }
         } catch (e) {
-            log(`[ClimaCN] Failed to create icon from ${filePath}: ${e}`);
+            console.error(`[ClimaCN] Failed to create icon from ${filePath}: ${e}`);
         }
         return null;
     }
@@ -519,7 +530,7 @@ export default class ClimaCNExtension extends Extension {
         } else {
             this._weatherIcon.icon_name = 'weather-severe-alert-symbolic';
         }
-        
+
         this._tempLabel.text = `${temp}°`;
         this._weatherDescLabel.text = now.text || '--';
         this._feelsLikeLabel.text = now.feelsLike ? `${now.feelsLike}°` : '--°';
@@ -538,9 +549,9 @@ export default class ClimaCNExtension extends Extension {
             const count = Math.min(forecast.length, 3);
             for (let i = 0; i < count; i++) {
                 const day = forecast[i];
-                const row = new St.BoxLayout({ 
+                const row = new St.BoxLayout({
                     style_class: 'climacn-forecast-row',
-                    y_align: Clutter.ActorAlign.CENTER 
+                    y_align: Clutter.ActorAlign.CENTER
                 });
 
                 // 日期
