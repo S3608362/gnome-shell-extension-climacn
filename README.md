@@ -30,6 +30,17 @@ ClimaCN 基于和风天气 API，内置全国城市数据库，支持自定义 A
 ## 🔑 获取 API Key
 前往 [和风天气开发版](https://dev.qweather.com/)注册免费账号即可获取。
 
+## 📤 打包发布
+`gnome-extensions pack` 默认**不会**打包 `icons/` 和 `data/`，若直接上传默认产物，扩展将丢失天气图标与城市数据库。打包时必须显式指定这两个目录：
+
+```bash
+gnome-extensions pack --force \
+  --extra-source=icons --extra-source=data \
+  --out-dir=. .
+```
+
+打包后请确认 zip 内含 `data/China-City-List-latest.csv` 与 `icons/`（约 500 个 SVG），产物应接近 470 KB。
+
 ## 常见问题
 
 Q: 图标全是黑色？

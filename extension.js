@@ -26,6 +26,40 @@ function getForecastUrl(baseUrl, locationId) {
     return `${baseUrl}/v7/weather/3d?location=${locationId}`;
 }
 
+/* =====================================================================
+ * CSV 行解析
+ * 城市库中部分字段被引号包裹且内含逗号（如 "Taiwan, Province of China"），
+ * 直接用 split(',') 会导致后续字段整体错位，故按 CSV 规则逐字符解析。
+ * 引号内的 "" 表示一个字面量引号。
+ * ===================================================================== */
+function parseCsvLine(line) {
+    const fields = [];
+    let field = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (inQuotes) {
+            if (ch !== '"') {
+                field += ch;
+            } else if (line[i + 1] === '"') {
+                field += '"';
+                i++;
+            } else {
+                inQuotes = false;
+            }
+        } else if (ch === '"') {
+            inQuotes = true;
+        } else if (ch === ',') {
+            fields.push(field);
+            field = '';
+        } else {
+            field += ch;
+        }
+    }
+    fields.push(field);
+    return fields;
+}
+
 export default class ClimaCNExtension extends Extension {
     enable() {
         this._indicator = null;
@@ -306,13 +340,15 @@ export default class ClimaCNExtension extends Extension {
         for (let i = 1; i < lines.length; i++) {
             const line = lines[i].trim();
             if (!line) continue;
-            const cols = line.split(',');
+            const cols = parseCsvLine(line);
             if (cols.length < 10) continue;
             const id = cols[0].trim();
             const name = cols[2].trim();
             const adm1 = cols[7].trim();
             const adm2 = cols[9].trim();
-            if (id && name && adm1) cities.push({ id, name, adm1, adm2 });
+            // 跳过列名表头行（港澳城市的 Location ID 含字母，不能用数字规则过滤）
+            if (id === 'Location_ID' || !name || !adm1) continue;
+            cities.push({ id, name, adm1, adm2 });
         }
         this._cityData = cities;
     }
@@ -446,6 +482,8 @@ export default class ClimaCNExtension extends Extension {
                     const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
                     if (json.code === '200' && json.now) {
                         this._fetchForecast((forecast) => {
+                            // 预报返回时 disable() 可能已执行，UI 引用均已释放
+                            if (!this._cancellable) return;
                             this._updateUI(json.now, forecast);
                         });
                     } else {
