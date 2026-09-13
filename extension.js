@@ -62,6 +62,10 @@ function parseCsvLine(line) {
 
 export default class ClimaCNExtension extends Extension {
     enable() {
+        // 所有异步回调的统一守卫：disable() 置为 false，在途回调据此提前返回。
+        // 不复用 _cancellable 兼任哨兵，以免「请求令牌」与「是否已禁用」两个语义相互干扰。
+        this._enabled = true;
+
         this._indicator = null;
         this._timeoutId = 0;
         this._searchTimeoutId = 0;
@@ -87,6 +91,20 @@ export default class ClimaCNExtension extends Extension {
         this._baseUrlChangedId = this._settings.connect('changed::api-base-url', () => {
             this._baseUrl = this._settings.get_string('api-base-url') || 'https://devapi.qweather.com';
         });
+        // 城市也可由外部（dconf-editor / gsettings）修改。
+        // 与内存值相同说明是 _selectCity() 自己写入触发的，已在那边处理，此处跳过以免重复请求。
+        this._locationChangedId = this._settings.connect('changed::location-id', () => {
+            const id = this._settings.get_string('location-id');
+            if (!this._enabled || id === this._currentLocationId) return;
+            this._currentLocationId = id;
+            this._fetchWeather();
+        });
+        this._cityNameChangedId = this._settings.connect('changed::city-name', () => {
+            const name = this._settings.get_string('city-name');
+            if (!this._enabled || name === this._currentCityName) return;
+            this._currentCityName = name;
+            if (this._cityLabel) this._cityLabel.text = name;
+        });
 
         this._stylesheetPath = this.path + '/stylesheet.css';
         this._theme = St.ThemeContext.get_for_stage(global.stage).get_theme();
@@ -98,6 +116,9 @@ export default class ClimaCNExtension extends Extension {
     }
 
     disable() {
+        // 最先置位：任何在途回调此后都会立即返回，不再触碰已释放的引用
+        this._enabled = false;
+
         if (this._timeoutId) {
             GLib.Source.remove(this._timeoutId);
             this._timeoutId = 0;
@@ -142,6 +163,14 @@ export default class ClimaCNExtension extends Extension {
             if (this._baseUrlChangedId) {
                 this._settings.disconnect(this._baseUrlChangedId);
                 this._baseUrlChangedId = 0;
+            }
+            if (this._locationChangedId) {
+                this._settings.disconnect(this._locationChangedId);
+                this._locationChangedId = 0;
+            }
+            if (this._cityNameChangedId) {
+                this._settings.disconnect(this._cityNameChangedId);
+                this._cityNameChangedId = 0;
             }
             this._settings = null;
         }
@@ -314,8 +343,8 @@ export default class ClimaCNExtension extends Extension {
         this._isLoadingCities = true;
         const csvFile = Gio.File.new_for_path(`${this.path}/data/China-City-List-latest.csv`);
         csvFile.load_contents_async(null, (file, result) => {
-            // disable() 已执行：_session 被置空，此时 UI 引用已释放，不可再触碰
-            if (!this._session) return;
+            // disable() 已执行：UI 引用已释放，不可再触碰
+            if (!this._enabled) return;
             try {
                 const [success, contents] = file.load_contents_finish(result);
                 if (!success) throw new Error('load failed');
@@ -331,23 +360,38 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _parseCSV(csvText) {
-        const lines = csvText.split('\n');
-        if (lines.length < 2) {
-            this._cityData = [];
-            return;
-        }
         const cities = [];
-        for (let i = 1; i < lines.length; i++) {
-            const line = lines[i].trim();
+        // 列序号由表头按列名解析而非写死：和风若调整列顺序，
+        // 写死的序号会静默解析出错误数据而不报错。
+        let col = null;
+        for (const rawLine of csvText.split('\n')) {
+            const line = rawLine.trim();
             if (!line) continue;
             const cols = parseCsvLine(line);
             if (cols.length < 10) continue;
-            const id = cols[0].trim();
-            const name = cols[2].trim();
-            const adm1 = cols[7].trim();
-            const adm2 = cols[9].trim();
-            // 跳过列名表头行（港澳城市的 Location ID 含字母，不能用数字规则过滤）
-            if (id === 'Location_ID' || !name || !adm1) continue;
+
+            if (!col) {
+                const names = cols.map(c => c.trim());
+                if (!names.includes('Location_ID')) continue;   // 版本行
+                col = {
+                    id: names.indexOf('Location_ID'),
+                    name: names.indexOf('Location_Name_ZH'),
+                    adm1: names.indexOf('Adm1_Name_ZH'),
+                    adm2: names.indexOf('Adm2_Name_ZH'),
+                };
+                // adm2 仅用于显示，缺失不算致命
+                if (col.name < 0 || col.adm1 < 0) {
+                    console.error('[ClimaCN] 城市库表头缺少必要列，已放弃解析');
+                    break;
+                }
+                continue;
+            }
+
+            const id = cols[col.id].trim();
+            const name = cols[col.name].trim();
+            const adm1 = cols[col.adm1].trim();
+            const adm2 = col.adm2 < 0 ? '' : cols[col.adm2].trim();
+            if (!name || !adm1) continue;
             cities.push({ id, name, adm1, adm2 });
         }
         this._cityData = cities;
@@ -454,6 +498,7 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _fetchWeather() {
+        if (!this._enabled) return;
         if (!this._apiKey || this._apiKey.trim() === '') {
             this._showError(_('请在设置中配置 API Key'));
             return;
@@ -462,7 +507,8 @@ export default class ClimaCNExtension extends Extension {
             this._showError(_('请在设置中配置 API Base URL'));
             return;
         }
-        if (!this._cancellable || this._cancellable.is_cancelled())
+        // _enabled 为真即保证 enable() 已跑完，_cancellable 必定存在
+        if (this._cancellable.is_cancelled())
             this._cancellable = new Gio.Cancellable();
 
         const url = getWeatherUrl(this._baseUrl, this._currentLocationId);
@@ -477,13 +523,13 @@ export default class ClimaCNExtension extends Extension {
             (session, result) => {
                 try {
                     const bytes = session.send_and_read_finish(result);
-                    // _cancellable 为 null 表示 disable() 已执行，此时 UI 引用已释放
-                    if (!this._cancellable || this._cancellable.is_cancelled()) return;
+                    // disable() 之后 UI 引用均已释放，不可再触碰
+                    if (!this._enabled || this._cancellable?.is_cancelled()) return;
                     const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
                     if (json.code === '200' && json.now) {
                         this._fetchForecast((forecast) => {
-                            // 预报返回时 disable() 可能已执行，UI 引用均已释放
-                            if (!this._cancellable) return;
+                            // 预报返回时 disable() 可能已执行
+                            if (!this._enabled) return;
                             this._updateUI(json.now, forecast);
                         });
                     } else {
@@ -500,7 +546,7 @@ export default class ClimaCNExtension extends Extension {
                         }
                     }
                 } catch (e) {
-                    if (!this._cancellable) return;
+                    if (!this._enabled) return;
                     console.error(`[ClimaCN] Network/parse error: ${e}`);
                     this._showError();
                 }
@@ -524,7 +570,9 @@ export default class ClimaCNExtension extends Extension {
             (session, result) => {
                 try {
                     const bytes = session.send_and_read_finish(result);
-                    if (!this._cancellable || this._cancellable.is_cancelled()) {
+                    // disable() 后不再回调，否则调用方会去更新已释放的 UI
+                    if (!this._enabled) return;
+                    if (this._cancellable?.is_cancelled()) {
                         callback(null);
                         return;
                     }
@@ -536,7 +584,7 @@ export default class ClimaCNExtension extends Extension {
                         callback(null);
                     }
                 } catch (e) {
-                    if (!this._cancellable) return;
+                    if (!this._enabled) return;
                     console.error(`[ClimaCN] Forecast parse error: ${e}`);
                     callback(null);
                 }
@@ -594,7 +642,7 @@ export default class ClimaCNExtension extends Extension {
 
                 // 日期
                 const dayLabel = new St.Label({
-                    text: dayNames[i] || day.fxDate.substring(5),
+                    text: dayNames[i],
                     style_class: 'climacn-forecast-day',
                     y_align: Clutter.ActorAlign.CENTER
                 });
