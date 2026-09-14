@@ -16,14 +16,65 @@ import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/
 const UPDATE_INTERVAL_SEC = 15 * 60;
 
 /* =====================================================================
- * 和风天气 API 基础 URL
+ * 和风天气 v1 接口
+ * 定位由城市 ID 改为经纬度，认证仍走 API Key 请求头。
+ * 旧的公共地址（devapi.qweather.com 等）自 2026 年起逐步停止服务。
  * ===================================================================== */
-function getWeatherUrl(baseUrl, locationId) {
-    return `${baseUrl}/v7/weather/now?location=${locationId}`;
+function getWeatherUrl(host, lat, lon) {
+    return `${host}/weather/v1/current/${formatCoord(lat)}/${formatCoord(lon)}?localTime=true`;
 }
 
-function getForecastUrl(baseUrl, locationId) {
-    return `${baseUrl}/v7/weather/3d?location=${locationId}`;
+function getForecastUrl(host, lat, lon) {
+    return `${host}/weather/v1/daily/${formatCoord(lat)}/${formatCoord(lon)}?days=3&localTime=true`;
+}
+
+/* 文档要求经纬度最多两位小数 */
+function formatCoord(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n.toFixed(2) : '0.00';
+}
+
+/* API Host 由用户从控制台复制，形如 abcxyz.qweatherapi.com（不含协议）。
+ * 也容忍用户直接粘贴带 https:// 的完整地址或带结尾斜杠。 */
+function normalizeHost(raw) {
+    const host = (raw || '').trim().replace(/\/+$/, '');
+    if (!host)
+        return '';
+    return /^https?:\/\//i.test(host) ? host : `https://${host}`;
+}
+
+/* v1 的风向是方位代码（nw / nne），旧接口直接给中文（西北风） */
+const COMPASS_ZH = {
+    n: '北风', nne: '东北偏北风', ne: '东北风', ene: '东北偏东风',
+    e: '东风', ese: '东南偏东风', se: '东南风', sse: '东南偏南风',
+    s: '南风', ssw: '西南偏南风', sw: '西南风', wsw: '西南偏西风',
+    w: '西风', wnw: '西北偏西风', nw: '西北风', nnw: '西北偏北风',
+    none: '无持续风向', vrb: '风向不定',
+};
+
+function compassToChinese(code) {
+    return COMPASS_ZH[String(code || '').toLowerCase()] || '--';
+}
+
+/* v1 的湿度、云量、降水概率都是 0–1 的小数，直接拼 % 会显示成 0.65% */
+function toPercent(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? `${Math.round(n * 100)}%` : '--%';
+}
+
+/* 温度是浮点数（如 31.7），显示前取整。
+ * 统一显示为 22°，不跟随接口返回的 "c" 单位，避免与 °C 混用。 */
+function roundTemp(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? `${Math.round(n)}°` : '--°';
+}
+
+/* 其余量值沿用接口给的单位（hPa / km / mm 等），形如 {value, unit} */
+function formatMeasure(obj, fallback = '--') {
+    const n = Number(obj?.value);
+    if (!Number.isFinite(n))
+        return fallback;
+    return obj?.unit ? `${Math.round(n)} ${obj.unit}` : `${Math.round(n)}`;
 }
 
 /* =====================================================================
@@ -79,29 +130,38 @@ export default class ClimaCNExtension extends Extension {
 
         this._settings = this.getSettings();
         this._apiKey = this._settings.get_string('api-key') || '';
-        this._baseUrl = this._settings.get_string('api-base-url') || 'https://devapi.qweather.com';
+        this._host = normalizeHost(this._settings.get_string('api-base-url'));
 
-        // 当前城市：默认值由 GSettings schema 提供，代码中不再硬编码
-        this._currentLocationId = this._settings.get_string('location-id');
+        // 当前城市：默认值由 GSettings schema 提供
+        this._latitude = this._settings.get_double('latitude');
+        this._longitude = this._settings.get_double('longitude');
         this._currentCityName = this._settings.get_string('city-name');
+
+        // _selectCity() 会连续写三个键，期间置位以免监听器重复发起请求
+        this._writingSettings = false;
 
         this._apiKeyChangedId = this._settings.connect('changed::api-key', () => {
             this._apiKey = this._settings.get_string('api-key') || '';
         });
-        this._baseUrlChangedId = this._settings.connect('changed::api-base-url', () => {
-            this._baseUrl = this._settings.get_string('api-base-url') || 'https://devapi.qweather.com';
+        this._hostChangedId = this._settings.connect('changed::api-base-url', () => {
+            this._host = normalizeHost(this._settings.get_string('api-base-url'));
         });
-        // 城市也可由外部（dconf-editor / gsettings）修改。
-        // 与内存值相同说明是 _selectCity() 自己写入触发的，已在那边处理，此处跳过以免重复请求。
-        this._locationChangedId = this._settings.connect('changed::location-id', () => {
-            const id = this._settings.get_string('location-id');
-            if (!this._enabled || id === this._currentLocationId) return;
-            this._currentLocationId = id;
+        // 城市也可由外部（dconf-editor / gsettings）修改
+        const onLocationChanged = () => {
+            if (!this._enabled || this._writingSettings) return;
+            const lat = this._settings.get_double('latitude');
+            const lon = this._settings.get_double('longitude');
+            if (lat === this._latitude && lon === this._longitude) return;
+            this._latitude = lat;
+            this._longitude = lon;
             this._fetchWeather();
-        });
+        };
+        this._latitudeChangedId = this._settings.connect('changed::latitude', onLocationChanged);
+        this._longitudeChangedId = this._settings.connect('changed::longitude', onLocationChanged);
         this._cityNameChangedId = this._settings.connect('changed::city-name', () => {
+            if (!this._enabled || this._writingSettings) return;
             const name = this._settings.get_string('city-name');
-            if (!this._enabled || name === this._currentCityName) return;
+            if (name === this._currentCityName) return;
             this._currentCityName = name;
             if (this._cityLabel) this._cityLabel.text = name;
         });
@@ -160,13 +220,17 @@ export default class ClimaCNExtension extends Extension {
                 this._settings.disconnect(this._apiKeyChangedId);
                 this._apiKeyChangedId = 0;
             }
-            if (this._baseUrlChangedId) {
-                this._settings.disconnect(this._baseUrlChangedId);
-                this._baseUrlChangedId = 0;
+            if (this._hostChangedId) {
+                this._settings.disconnect(this._hostChangedId);
+                this._hostChangedId = 0;
             }
-            if (this._locationChangedId) {
-                this._settings.disconnect(this._locationChangedId);
-                this._locationChangedId = 0;
+            if (this._latitudeChangedId) {
+                this._settings.disconnect(this._latitudeChangedId);
+                this._latitudeChangedId = 0;
+            }
+            if (this._longitudeChangedId) {
+                this._settings.disconnect(this._longitudeChangedId);
+                this._longitudeChangedId = 0;
             }
             if (this._cityNameChangedId) {
                 this._settings.disconnect(this._cityNameChangedId);
@@ -207,9 +271,11 @@ export default class ClimaCNExtension extends Extension {
         this._cityData = null;
         this._isLoadingCities = false;
         this._apiKey = null;
-        this._baseUrl = null;
-        this._currentLocationId = null;
+        this._host = null;
+        this._latitude = 0;
+        this._longitude = 0;
         this._currentCityName = null;
+        this._writingSettings = false;
         this._stylesheetPath = null;
         this._theme = null;
         this._cancellable = null;
@@ -490,9 +556,11 @@ export default class ClimaCNExtension extends Extension {
                     name: names.indexOf('Location_Name_ZH'),
                     adm1: names.indexOf('Adm1_Name_ZH'),
                     adm2: names.indexOf('Adm2_Name_ZH'),
+                    lat: names.indexOf('Latitude'),
+                    lon: names.indexOf('Longitude'),
                 };
-                // adm2 仅用于显示，缺失不算致命
-                if (col.name < 0 || col.adm1 < 0) {
+                // adm2 仅用于显示，缺失不算致命；经纬度是 v1 接口的定位依据，必须有
+                if (col.name < 0 || col.adm1 < 0 || col.lat < 0 || col.lon < 0) {
                     console.error('[ClimaCN] 城市库表头缺少必要列，已放弃解析');
                     break;
                 }
@@ -503,8 +571,11 @@ export default class ClimaCNExtension extends Extension {
             const name = cols[col.name].trim();
             const adm1 = cols[col.adm1].trim();
             const adm2 = col.adm2 < 0 ? '' : cols[col.adm2].trim();
+            const lat = Number(cols[col.lat]);
+            const lon = Number(cols[col.lon]);
             if (!name || !adm1) continue;
-            cities.push({ id, name, adm1, adm2 });
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+            cities.push({ id, name, adm1, adm2, lat, lon });
         }
         this._cityData = cities;
     }
@@ -592,11 +663,18 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _selectCity(city) {
-        this._currentLocationId = city.id;
+        this._latitude = city.lat;
+        this._longitude = city.lon;
         this._currentCityName = `${city.name}，${city.adm1}`;
         this._cityLabel.text = this._currentCityName;
-        this._settings.set_string('location-id', this._currentLocationId);
+
+        // 三个键连续写入，期间挡住监听器，避免重复发起请求
+        this._writingSettings = true;
+        this._settings.set_double('latitude', this._latitude);
+        this._settings.set_double('longitude', this._longitude);
         this._settings.set_string('city-name', this._currentCityName);
+        this._writingSettings = false;
+
         this._searchEntry.text = '';
         this._clearSearchResults();
         this._fetchWeather();
@@ -609,21 +687,48 @@ export default class ClimaCNExtension extends Extension {
         });
     }
 
+    /* v1 不再用响应体里的 code 字段表示结果，改看 HTTP 状态码。
+     * 401/403 说明凭据无效，继续轮询没有意义，直接停掉自动刷新。 */
+    _handleHttpError(message, bytes) {
+        const status = message.status_code;
+        let body = '';
+        try {
+            body = new TextDecoder().decode(bytes.get_data()).slice(0, 300);
+        } catch (_e) {
+            // 响应体读不出来不影响错误提示
+        }
+        console.error(`[ClimaCN] HTTP ${status}: ${body}`);
+
+        if (status === Soup.Status.UNAUTHORIZED || status === Soup.Status.FORBIDDEN) {
+            if (this._timeoutId) {
+                GLib.Source.remove(this._timeoutId);
+                this._timeoutId = 0;
+            }
+            this._showError(_('API Key 无效或无权访问，已停止更新'));
+            return;
+        }
+        if (status === Soup.Status.NOT_FOUND) {
+            this._showError(_('API Host 或接口路径不正确'));
+            return;
+        }
+        this._showError(`请求失败（HTTP ${status}）`);
+    }
+
     _fetchWeather() {
         if (!this._enabled) return;
         if (!this._apiKey || this._apiKey.trim() === '') {
             this._showError(_('请在设置中配置 API Key'));
             return;
         }
-        if (!this._baseUrl || this._baseUrl.trim() === '') {
-            this._showError(_('请在设置中配置 API Base URL'));
+        if (!this._host) {
+            this._showError(_('请在设置中配置 API Host'));
             return;
         }
         // _enabled 为真即保证 enable() 已跑完，_cancellable 必定存在
         if (this._cancellable.is_cancelled())
             this._cancellable = new Gio.Cancellable();
 
-        const url = getWeatherUrl(this._baseUrl, this._currentLocationId);
+        const url = getWeatherUrl(this._host, this._latitude, this._longitude);
         const message = Soup.Message.new('GET', url);
         if (!message) return;
         message.request_headers.append('X-Qw-Api-Key', this._apiKey);
@@ -637,26 +742,23 @@ export default class ClimaCNExtension extends Extension {
                     const bytes = session.send_and_read_finish(result);
                     // disable() 之后 UI 引用均已释放，不可再触碰
                     if (!this._enabled || this._cancellable?.is_cancelled()) return;
-                    const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
-                    if (json.code === '200' && json.now) {
-                        this._fetchForecast((forecast) => {
-                            // 预报返回时 disable() 可能已执行
-                            if (!this._enabled) return;
-                            this._updateUI(json.now, forecast);
-                        });
-                    } else {
-                        const errCode = json.code || 'unknown';
-                        console.error(`[ClimaCN] API error: code=${errCode}, response=${JSON.stringify(json)}`);
-                        if (errCode === '401' || errCode === '403') {
-                            if (this._timeoutId) {
-                                GLib.Source.remove(this._timeoutId);
-                                this._timeoutId = 0;
-                            }
-                            this._showError(_('API 密钥无效或无权访问，已停止更新'));
-                        } else {
-                            this._showError();
-                        }
+
+                    if (message.status_code !== Soup.Status.OK) {
+                        this._handleHttpError(message, bytes);
+                        return;
                     }
+
+                    const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
+                    if (!json.condition || !json.temperature) {
+                        console.error(`[ClimaCN] 响应缺少预期字段: ${JSON.stringify(json).slice(0, 300)}`);
+                        this._showError();
+                        return;
+                    }
+                    this._fetchForecast((forecast) => {
+                        // 预报返回时 disable() 可能已执行
+                        if (!this._enabled) return;
+                        this._updateUI(json, forecast);
+                    });
                 } catch (e) {
                     if (!this._enabled) return;
                     console.error(`[ClimaCN] Network/parse error: ${e}`);
@@ -667,7 +769,7 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _fetchForecast(callback) {
-        const url = getForecastUrl(this._baseUrl, this._currentLocationId);
+        const url = getForecastUrl(this._host, this._latitude, this._longitude);
         const message = Soup.Message.new('GET', url);
         if (!message) {
             callback(null);
@@ -688,13 +790,14 @@ export default class ClimaCNExtension extends Extension {
                         callback(null);
                         return;
                     }
-                    const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
-                    if (json.code === '200' && json.daily) {
-                        callback(json.daily);
-                    } else {
-                        console.error(`[ClimaCN] Forecast error: code=${json.code}`);
+                    if (message.status_code !== Soup.Status.OK) {
+                        console.error(`[ClimaCN] 预报请求 HTTP ${message.status_code}`);
                         callback(null);
+                        return;
                     }
+                    const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
+                    // v1 的数组字段名是 days，不再是 daily
+                    callback(Array.isArray(json.days) ? json.days : null);
                 } catch (e) {
                     if (!this._enabled) return;
                     console.error(`[ClimaCN] Forecast parse error: ${e}`);
@@ -729,25 +832,44 @@ export default class ClimaCNExtension extends Extension {
         }
     }
 
+    /* now 是 v1 /weather/v1/current 的完整响应体（含 metadata） */
     _updateUI(now, forecast) {
         // ---- 当前天气 ----
-        const iconCode = now.icon || '999';
-        const temp = now.temp || '--';
+        const iconCode = now.condition?.code || '999';
         const icon = this._createFileIcon(`${this.path}/icons/${iconCode}-symbolic.svg`);
+        const tempText = roundTemp(now.temperature?.value);
 
         // 顶栏
         this._applyIcon(this._weatherIcon, icon);
-        this._tempLabel.text = `${temp}°`;
+        this._tempLabel.text = tempText;
         // 卡片头
         this._applyIcon(this._headerIcon, icon);
-        this._headerTemp.text = `${temp}°`;
-        this._headerCondition.text = now.text || '--';
+        this._headerTemp.text = tempText;
+        this._headerCondition.text = now.condition?.text || '--';
 
-        this._feelsLikeLabel.text = now.feelsLike ? `${now.feelsLike}°` : '--°';
-        this._humidityLabel.text = now.humidity ? `${now.humidity}%` : '--%';
-        this._windLabel.text = `${now.windDir || '--'} ${now.windScale || '--'}级`;
-        const obsTime = now.obsTime || '';
-        this._updateTimeLabel.text = obsTime ? obsTime.substring(11, 16) : '--:--';
+        // ---- 常用数据（两列网格）----
+        this._feelsLikeLabel.text = roundTemp(now.feelsLike?.value);
+        this._humidityLabel.text = toPercent(now.humidity);
+        this._windLabel.text =
+            `${compassToChinese(now.wind?.direction?.compass)} ${now.wind?.scale ?? '--'}级`;
+        // v1 的实时天气不再返回观测时间，这里显示本次拉取成功的本地时间
+        this._updateTimeLabel.text = GLib.DateTime.new_now_local().format('%H:%M');
+
+        // ---- 折叠区数据 ----
+        this._pressureLabel.text   = formatMeasure(now.pressure);
+        this._visibilityLabel.text = formatMeasure(now.visibility);
+        this._dewPointLabel.text   = roundTemp(now.dewPoint?.value);
+        this._cloudCoverLabel.text = toPercent(now.cloudCover);
+        this._uvIndexLabel.text    = Number.isFinite(Number(now.uvIndex))
+            ? `${Math.round(Number(now.uvIndex))}` : '--';
+        this._windGustLabel.text   = formatMeasure(now.windGust);
+        this._precipLabel.text     = formatMeasure(now.precipitation?.amount);
+
+        // ---- 数据归因（和风天气条款要求与数据共同显示）----
+        if (this._attributionItem) {
+            this._attributionLabel.text = _('数据来源：和风天气');
+            this._attributionItem.visible = true;
+        }
 
         // ---- 未来3天预报 ----
         if (this._forecastRowsBox) {
@@ -772,8 +894,8 @@ export default class ClimaCNExtension extends Extension {
                 });
                 row.add_child(dayLabel);
 
-                // 天气图标（使用本地 SVG）
-                const iconCodeFore = day.iconDay || '999';
+                // 天气图标（使用本地 SVG）。v1 把白天/夜间拆成两个对象，取白天
+                const iconCodeFore = day.daytime?.condition?.code || '999';
                 const iconPathFore = `${this.path}/icons/${iconCodeFore}-symbolic.svg`;
                 const iconFore = this._createFileIcon(iconPathFore);
                 let iconWidget;
@@ -794,7 +916,7 @@ export default class ClimaCNExtension extends Extension {
 
                 // 温度范围（单位与卡片头保持一致，不再单独写 °C）
                 const tempLabel = new St.Label({
-                    text: `${day.tempMin}° / ${day.tempMax}°`,
+                    text: `${roundTemp(day.temperatureMin?.value)} / ${roundTemp(day.temperatureMax?.value)}`,
                     style_class: 'climacn-forecast-temp',
                     y_align: Clutter.ActorAlign.CENTER
                 });
@@ -802,7 +924,7 @@ export default class ClimaCNExtension extends Extension {
 
                 // 天气状况
                 const conditionLabel = new St.Label({
-                    text: day.textDay || '--',
+                    text: day.daytime?.condition?.text || '--',
                     style_class: 'climacn-forecast-condition',
                     y_align: Clutter.ActorAlign.CENTER
                 });
@@ -827,10 +949,20 @@ export default class ClimaCNExtension extends Extension {
         this._tempLabel.text = 'N/A';
         this._headerTemp.text = 'N/A';
         this._headerCondition.text = message;
-        this._feelsLikeLabel.text = '--°';
-        this._humidityLabel.text = '--%';
-        this._windLabel.text = '--';
-        this._updateTimeLabel.text = '--:--';
+
+        // 出错时把数值全部清空，避免残留上次的旧数据误导用户
+        for (const label of [this._feelsLikeLabel, this._humidityLabel, this._windLabel,
+                             this._updateTimeLabel, this._pressureLabel, this._visibilityLabel,
+                             this._dewPointLabel, this._cloudCoverLabel, this._uvIndexLabel,
+                             this._windGustLabel, this._precipLabel]) {
+            if (label)
+                label.text = '--';
+        }
+
+        // 数据已失效，归因行随之隐藏
+        if (this._attributionItem)
+            this._attributionItem.visible = false;
+
         if (this._forecastRowsBox) {
             this._forecastRowsBox.remove_all_children();
             const errLabel = new St.Label({

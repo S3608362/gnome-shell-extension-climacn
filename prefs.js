@@ -16,7 +16,7 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
         // --- API 设置分组 ---
         const apiGroup = new Adw.PreferencesGroup({
             title: 'API 设置',
-            description: '配置和风天气 API（Key 与 Base URL 可在和风天气控制台获取）',
+            description: '两项均可在和风天气控制台获取。公共 API 地址（devapi.qweather.com 等）自 2026 年起停止服务，请务必填写你自己的 API Host。',
         });
         page.add(apiGroup);
 
@@ -29,19 +29,19 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
         });
         apiGroup.add(apiKeyRow);
 
-        const apiUrlRow = new Adw.EntryRow({
-            title: 'API Base URL',
+        const apiHostRow = new Adw.EntryRow({
+            title: 'API Host',
             text: settings.get_string('api-base-url') || '',
         });
-        apiUrlRow.connect('changed', (widget) => {
+        apiHostRow.connect('changed', (widget) => {
             settings.set_string('api-base-url', widget.text);
         });
-        apiGroup.add(apiUrlRow);
+        apiGroup.add(apiHostRow);
 
         // --- 说明分组 ---
         const infoGroup = new Adw.PreferencesGroup({
             title: '说明',
-            description: '城市搜索使用本地数据库（data/China-City-List-latest.csv），图标使用本地 SVG，无需额外配置。',
+            description: 'API Host 形如 abcxyz.qweatherapi.com，无需填写 https://。城市搜索使用本地数据库（data/China-City-List-latest.csv），图标使用本地 SVG。',
         });
         page.add(infoGroup);
     }
