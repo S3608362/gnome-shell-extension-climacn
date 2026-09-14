@@ -35,12 +35,16 @@ function formatCoord(value) {
 }
 
 /* API Host 由用户从控制台复制，形如 abcxyz.qweatherapi.com（不含协议）。
- * 也容忍用户直接粘贴带 https:// 的完整地址或带结尾斜杠。 */
+ * 也容忍粘贴带协议的完整地址、结尾斜杠或多余路径。
+ * 一律强制 https：接口文档写明"scheme 仅支持 HTTPS 协议"，
+ * 若沿用用户输入的 http:// 会让 API Key 明文传输。 */
 function normalizeHost(raw) {
-    const host = (raw || '').trim().replace(/\/+$/, '');
+    const host = (raw || '').trim()
+        .replace(/^https?:\/\//i, '')   // 去掉协议
+        .split('/')[0];                 // 只取主机名，丢掉路径与尾斜杠
     if (!host)
         return '';
-    return /^https?:\/\//i.test(host) ? host : `https://${host}`;
+    return `https://${host}`;
 }
 
 /* v1 的风向是方位代码（nw / nne），旧接口直接给中文（西北风） */
@@ -75,6 +79,13 @@ function formatMeasure(obj, fallback = '--') {
     if (!Number.isFinite(n))
         return fallback;
     return obj?.unit ? `${Math.round(n)} ${obj.unit}` : `${Math.round(n)}`;
+}
+
+/* 天气图标代码直接来自服务端响应，要拼进文件路径，必须校验。
+ * 不校验的话，形如 "../../../x" 的代码会构成路径穿越。 */
+function safeIconCode(code) {
+    const s = String(code ?? '');
+    return /^[0-9A-Za-z]+$/.test(s) ? s : '999';
 }
 
 /* =====================================================================
@@ -120,6 +131,7 @@ export default class ClimaCNExtension extends Extension {
         this._indicator = null;
         this._timeoutId = 0;
         this._searchTimeoutId = 0;
+        this._configDebounceId = 0;
         this._searchActivateId = 0;
         this._searchTextChangedId = 0;
         this._session = new Soup.Session();
@@ -127,6 +139,7 @@ export default class ClimaCNExtension extends Extension {
 
         this._cityData = null;
         this._isLoadingCities = false;
+        this._requestSeq = 0;
 
         this._settings = this.getSettings();
         this._apiKey = this._settings.get_string('api-key') || '';
@@ -140,11 +153,30 @@ export default class ClimaCNExtension extends Extension {
         // _selectCity() 会连续写三个键，期间置位以免监听器重复发起请求
         this._writingSettings = false;
 
+        // 首选项里每敲一个字符就会触发一次 changed，必须防抖：
+        // 否则打到服务端的是一串用半截 Key 发出的无效请求，还会连累触发 401。
+        const onConfigChanged = () => {
+            if (!this._enabled) return;
+            if (this._configDebounceId) {
+                GLib.Source.remove(this._configDebounceId);
+                this._configDebounceId = 0;
+            }
+            this._configDebounceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 800, () => {
+                this._configDebounceId = 0;
+                if (!this._enabled) return GLib.SOURCE_REMOVE;
+                // 此前若因 401/403 停掉了自动刷新，配置改好后在这里恢复
+                this._startAutoRefresh();
+                this._fetchWeather();
+                return GLib.SOURCE_REMOVE;
+            });
+        };
         this._apiKeyChangedId = this._settings.connect('changed::api-key', () => {
             this._apiKey = this._settings.get_string('api-key') || '';
+            onConfigChanged();
         });
         this._hostChangedId = this._settings.connect('changed::api-base-url', () => {
             this._host = normalizeHost(this._settings.get_string('api-base-url'));
+            onConfigChanged();
         });
         // 城市也可由外部（dconf-editor / gsettings）修改
         const onLocationChanged = () => {
@@ -186,6 +218,10 @@ export default class ClimaCNExtension extends Extension {
         if (this._searchTimeoutId) {
             GLib.Source.remove(this._searchTimeoutId);
             this._searchTimeoutId = 0;
+        }
+        if (this._configDebounceId) {
+            GLib.Source.remove(this._configDebounceId);
+            this._configDebounceId = 0;
         }
 
         // 信号必须在 actor 销毁前断开：destroy() 之后 clutter_text 已不可访问
@@ -270,6 +306,7 @@ export default class ClimaCNExtension extends Extension {
         // 释放状态数据
         this._cityData = null;
         this._isLoadingCities = false;
+        this._requestSeq = 0;
         this._apiKey = null;
         this._host = null;
         this._latitude = 0;
@@ -680,7 +717,11 @@ export default class ClimaCNExtension extends Extension {
         this._fetchWeather();
     }
 
+    /* 幂等：已有定时器就不重复创建。
+     * 配置变更后也会调用它，用来恢复此前被 401/403 停掉的定时器。 */
     _startAutoRefresh() {
+        if (this._timeoutId)
+            return;
         this._timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, UPDATE_INTERVAL_SEC, () => {
             this._fetchWeather();
             return GLib.SOURCE_CONTINUE;
@@ -733,6 +774,10 @@ export default class ClimaCNExtension extends Extension {
         if (!message) return;
         message.request_headers.append('X-Qw-Api-Key', this._apiKey);
 
+        // 请求序号：快速连续切换城市时，先发的请求可能后返回，
+        // 若不丢弃过期响应，会出现"标题是新城市、数据是旧城市"的错配
+        const seq = ++this._requestSeq;
+
         this._session.send_and_read_async(
             message,
             Soup.MessagePriority.NORMAL,
@@ -742,6 +787,8 @@ export default class ClimaCNExtension extends Extension {
                     const bytes = session.send_and_read_finish(result);
                     // disable() 之后 UI 引用均已释放，不可再触碰
                     if (!this._enabled || this._cancellable?.is_cancelled()) return;
+                    // 已有更新的请求发出，本次结果作废
+                    if (seq !== this._requestSeq) return;
 
                     if (message.status_code !== Soup.Status.OK) {
                         this._handleHttpError(message, bytes);
@@ -754,9 +801,9 @@ export default class ClimaCNExtension extends Extension {
                         this._showError();
                         return;
                     }
-                    this._fetchForecast((forecast) => {
+                    this._fetchForecast(seq, (forecast) => {
                         // 预报返回时 disable() 可能已执行
-                        if (!this._enabled) return;
+                        if (!this._enabled || seq !== this._requestSeq) return;
                         this._updateUI(json, forecast);
                     });
                 } catch (e) {
@@ -768,7 +815,7 @@ export default class ClimaCNExtension extends Extension {
         );
     }
 
-    _fetchForecast(callback) {
+    _fetchForecast(seq, callback) {
         const url = getForecastUrl(this._host, this._latitude, this._longitude);
         const message = Soup.Message.new('GET', url);
         if (!message) {
@@ -786,6 +833,8 @@ export default class ClimaCNExtension extends Extension {
                     const bytes = session.send_and_read_finish(result);
                     // disable() 后不再回调，否则调用方会去更新已释放的 UI
                     if (!this._enabled) return;
+                    // 期间已切换到别的城市，本次预报作废
+                    if (seq !== this._requestSeq) return;
                     if (this._cancellable?.is_cancelled()) {
                         callback(null);
                         return;
@@ -835,7 +884,7 @@ export default class ClimaCNExtension extends Extension {
     /* now 是 v1 /weather/v1/current 的完整响应体（含 metadata） */
     _updateUI(now, forecast) {
         // ---- 当前天气 ----
-        const iconCode = now.condition?.code || '999';
+        const iconCode = safeIconCode(now.condition?.code);
         const icon = this._createFileIcon(`${this.path}/icons/${iconCode}-symbolic.svg`);
         const tempText = roundTemp(now.temperature?.value);
 
@@ -897,7 +946,7 @@ export default class ClimaCNExtension extends Extension {
                 row.add_child(dayLabel);
 
                 // 天气图标（使用本地 SVG）。v1 把白天/夜间拆成两个对象，取白天
-                const iconCodeFore = day.daytime?.condition?.code || '999';
+                const iconCodeFore = safeIconCode(day.daytime?.condition?.code);
                 const iconPathFore = `${this.path}/icons/${iconCodeFore}-symbolic.svg`;
                 const iconFore = this._createFileIcon(iconPathFore);
                 let iconWidget;
