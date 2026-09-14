@@ -89,10 +89,11 @@
   spacing: 8px;
 }
 
-/* 固定标签宽度，让左右两列的值各自对齐 */
+/* 固定标签宽度，让左右两列的值各自对齐。
+ * 4.5em 是为了容纳最长的“上次更新”（4 个汉字）。 */
 .climacn-detail-label {
   font-size: 0.9em;
-  width: 3.5em;
+  width: 4.5em;
   text-align: left;
   opacity: 0.7;
 }

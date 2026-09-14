@@ -380,7 +380,7 @@ export default class ClimaCNExtension extends Extension {
 
         const row2 = this._createGridRow(grid);
         this._windLabel       = this._createGridCell(row2, '风向', '--');
-        this._updateTimeLabel = this._createGridCell(row2, '更新', '--:--');
+        this._updateTimeLabel = this._createGridCell(row2, '上次更新', '--:--');
 
         const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
         item.add_child(grid);
@@ -865,9 +865,11 @@ export default class ClimaCNExtension extends Extension {
         this._windGustLabel.text   = formatMeasure(now.windGust);
         this._precipLabel.text     = formatMeasure(now.precipitation?.amount);
 
-        // ---- 数据归因（和风天气条款要求与数据共同显示）----
+        // ---- 数据归因 ----
+        // 和风天气条款要求归因与数据共同显示，此处保留极简来源一行，
+        // 完整的说明与链接放在首选项的“数据来源”分组里
         if (this._attributionItem) {
-            this._attributionLabel.text = _('数据来源：和风天气');
+            this._attributionLabel.text = _('和风天气');
             this._attributionItem.visible = true;
         }
 
