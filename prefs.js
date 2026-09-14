@@ -44,5 +44,16 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
             description: 'API Host 形如 abcxyz.qweatherapi.com，无需填写 https://。城市搜索使用本地数据库（data/China-City-List-latest.csv），图标使用本地 SVG。',
         });
         page.add(infoGroup);
+
+        // --- 数据来源分组 ---
+        // 和风天气条款要求数据归因与数据共同显示：菜单里保留一行“和风天气”，
+        // 完整的说明与链接集中放在这里
+        const sourceGroup = new Adw.PreferencesGroup({
+            title: '数据来源',
+            description: '天气数据由和风天气（QWeather）提供\n' +
+                '归因说明：https://developer.qweather.com/attribution.html\n' +
+                '天气图标来源于和风天气图标库（https://icons.qweather.com/），采用 CC BY 4.0 许可',
+        });
+        page.add(sourceGroup);
     }
 }
