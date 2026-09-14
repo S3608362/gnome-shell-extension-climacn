@@ -1,4 +1,14 @@
 /* ---------------------------------------------------------------------
+ * 水平内边距统一为 12px
+ * 各内容区若用不同的值，搜索框就会比下方文字更靠外，视觉上错位。
+ * --------------------------------------------------------------------- */
+.climacn-header-box,
+.climacn-details-grid,
+.climacn-forecast-box {
+  padding: 8px 12px;
+}
+
+/* ---------------------------------------------------------------------
  * 顶栏 indicator 样式
  * --------------------------------------------------------------------- */
 .climacn-indicator-box {
@@ -12,6 +22,39 @@
 .climacn-temperature {
   font-weight: bold;
   font-size: 0.95em;
+  /* 等宽数字：温度在 9° ↔ 22° ↔ -10° 之间变化时指示器宽度不跳动 */
+  font-feature-settings: 'tnum';
+}
+
+/* ---------------------------------------------------------------------
+ * 卡片头（大图标 + 大号温度 + 天气状况 + 城市名）
+ * --------------------------------------------------------------------- */
+.climacn-header-box {
+  spacing: 4px;
+}
+
+.climacn-header-row {
+  spacing: 10px;
+}
+
+.climacn-header-icon {
+  /* 图标大小由 icon_size 在 JS 中指定 */
+}
+
+.climacn-header-temp {
+  font-size: 2em;
+  font-weight: bold;
+  font-feature-settings: 'tnum';
+}
+
+.climacn-header-condition {
+  font-size: 1em;
+  opacity: 0.85;
+}
+
+.climacn-city-label {
+  font-size: 0.85em;
+  opacity: 0.7;
 }
 
 /* ---------------------------------------------------------------------
@@ -21,14 +64,20 @@
   padding: 6px 12px;
   font-size: 0.9em;
   border-radius: 8px;
-  margin: 4px 8px;
+  /* 与上方各内容区保持同一个水平内边距 */
+  margin: 4px 12px;
+}
+
+/* 搜索状态提示（“未找到相关城市”等），不能复用带固定宽度的 detail-label */
+.climacn-search-status {
+  font-size: 0.85em;
+  opacity: 0.7;
 }
 
 /* ---------------------------------------------------------------------
- * 详情区域（当前天气详细数据）
+ * 详情区（两列网格）
  * --------------------------------------------------------------------- */
-.climacn-details-box {
-  padding: 8px 12px;
+.climacn-details-grid {
   spacing: 8px;
 }
 
@@ -36,12 +85,16 @@
   spacing: 12px;
 }
 
-/* 固定标签宽度，解决冒号与右侧数值无法对齐的问题 */
+.climacn-detail-cell {
+  spacing: 8px;
+}
+
+/* 固定标签宽度，让左右两列的值各自对齐 */
 .climacn-detail-label {
   font-size: 0.9em;
-  width: 80px;
+  width: 3.5em;
   text-align: left;
-  opacity: 0.8;
+  opacity: 0.7;
 }
 
 .climacn-detail-value {
@@ -53,7 +106,6 @@
  * 未来 3 天预报区域
  * --------------------------------------------------------------------- */
 .climacn-forecast-box {
-  padding: 8px 12px;
   spacing: 8px;
 }
 
@@ -83,12 +135,13 @@
   icon-size: 18px;
 }
 
-/* 2. 温度范围 fixed 宽度对齐，避免因字符数变化导致右侧状况文字错位 */
+/* 2. 温度范围 fixed 宽度，右侧状况文字因此始终从同一位置开始 */
 .climacn-forecast-temp {
   font-size: 0.9em;
   font-weight: bold;
-  width: 100px;
+  width: 6em;
   text-align: left;
+  font-feature-settings: 'tnum';
 }
 
 .climacn-forecast-condition {
@@ -102,8 +155,9 @@
 }
 
 /* ---------------------------------------------------------------------
- * 底部操作栏（刷新按钮等）
+ * 数据归因（和风天气条款要求与数据共同显示）
  * --------------------------------------------------------------------- */
-.climacn-refresh-icon {
-  icon-size: 14px;
+.climacn-attribution {
+  font-size: 0.75em;
+  opacity: 0.55;
 }

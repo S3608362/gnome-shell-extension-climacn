@@ -178,12 +178,24 @@ export default class ClimaCNExtension extends Extension {
         // 释放全部 UI 引用，避免反复 enable/disable 后残留 actor 导致内存泄漏
         this._weatherIcon = null;
         this._tempLabel = null;
+        this._headerIcon = null;
+        this._headerTemp = null;
+        this._headerCondition = null;
         this._cityLabel = null;
-        this._weatherDescLabel = null;
         this._feelsLikeLabel = null;
         this._humidityLabel = null;
         this._windLabel = null;
         this._updateTimeLabel = null;
+        this._pressureLabel = null;
+        this._visibilityLabel = null;
+        this._dewPointLabel = null;
+        this._cloudCoverLabel = null;
+        this._uvIndexLabel = null;
+        this._windGustLabel = null;
+        this._precipLabel = null;
+        this._attributionLabel = null;
+        this._attributionItem = null;
+        this._refreshItem = null;
         this._forecastContainer = null;
         this._forecastTitle = null;
         this._forecastRowsBox = null;
@@ -229,41 +241,156 @@ export default class ClimaCNExtension extends Extension {
     _buildMenu() {
         this._indicator.menu.removeAll();
 
-        this._cityLabel = new St.Label({
-            text: this._currentCityName,
-            x_align: Clutter.ActorAlign.CENTER,
-            style: 'font-weight: bold; font-size: 1.05em; padding: 4px 0px;'
-        });
-        const cityItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
-        cityItem.add_child(this._cityLabel);
-        this._indicator.menu.addMenuItem(cityItem);
+        this._buildHeader();
 
+        // 分隔线只保留搜索框上下两条，其余靠间距区分，避免菜单被切得太碎
+        this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this._buildSearchUI();
         this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        const detailsBox = new St.BoxLayout({
-            style_class: 'climacn-details-box',
+        this._buildDetails();
+        this._buildForecast();
+        this._buildFooter();
+    }
+
+    /* 卡片头：大图标 + 大号温度 + 天气状况，城市名降为下方小字。
+     * 打开菜单第一眼就该读到“现在多少度、什么天”，而不是先看一串标签。 */
+    _buildHeader() {
+        const box = new St.BoxLayout({
+            style_class: 'climacn-header-box',
             vertical: true
         });
-        this._weatherDescLabel = this._createDetailRow(detailsBox, '天气', '--');
-        this._feelsLikeLabel   = this._createDetailRow(detailsBox, '体感温度', '--°');
-        this._humidityLabel    = this._createDetailRow(detailsBox, '湿度', '--%');
-        this._windLabel        = this._createDetailRow(detailsBox, '风向风力', '--');
-        this._updateTimeLabel  = this._createDetailRow(detailsBox, '更新时间', '--:--');
 
-        const detailsItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
-        detailsItem.add_child(detailsBox);
-        this._indicator.menu.addMenuItem(detailsItem);
+        const row = new St.BoxLayout({
+            style_class: 'climacn-header-row',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        this._headerIcon = new St.Icon({
+            style_class: 'climacn-header-icon',
+            icon_size: 40,
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        row.add_child(this._headerIcon);
 
-        // ---- 未来3天预报区域 ----
-        this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._headerTemp = new St.Label({
+            style_class: 'climacn-header-temp',
+            text: '--°',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        row.add_child(this._headerTemp);
 
+        this._headerCondition = new St.Label({
+            style_class: 'climacn-header-condition',
+            text: '--',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        row.add_child(this._headerCondition);
+
+        box.add_child(row);
+
+        this._cityLabel = new St.Label({
+            text: this._currentCityName,
+            style_class: 'climacn-city-label',
+            x_align: Clutter.ActorAlign.CENTER
+        });
+        box.add_child(this._cityLabel);
+
+        const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        item.add_child(box);
+        this._indicator.menu.addMenuItem(item);
+    }
+
+    /* 详情区：4 项常用数据排成两列网格；其余字段收进“更多数据”子菜单。
+     * 单列平铺的话，字段一多菜单会被拉得很长。 */
+    _buildDetails() {
+        const grid = new St.BoxLayout({
+            style_class: 'climacn-details-grid',
+            vertical: true
+        });
+
+        const row1 = this._createGridRow(grid);
+        this._feelsLikeLabel  = this._createGridCell(row1, '体感', '--°');
+        this._humidityLabel   = this._createGridCell(row1, '湿度', '--%');
+
+        const row2 = this._createGridRow(grid);
+        this._windLabel       = this._createGridCell(row2, '风向', '--');
+        this._updateTimeLabel = this._createGridCell(row2, '更新', '--:--');
+
+        const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        item.add_child(grid);
+        this._indicator.menu.addMenuItem(item);
+
+        const extra = new PopupMenu.PopupSubMenuMenuItem(_('更多数据'), false);
+        this._pressureLabel   = this._createExtraRow(extra.menu, '气压');
+        this._visibilityLabel = this._createExtraRow(extra.menu, '能见度');
+        this._dewPointLabel   = this._createExtraRow(extra.menu, '露点');
+        this._cloudCoverLabel = this._createExtraRow(extra.menu, '云量');
+        this._uvIndexLabel    = this._createExtraRow(extra.menu, '紫外线');
+        this._windGustLabel   = this._createExtraRow(extra.menu, '阵风');
+        this._precipLabel     = this._createExtraRow(extra.menu, '降水量');
+        this._indicator.menu.addMenuItem(extra);
+    }
+
+    _createGridRow(grid) {
+        const row = new St.BoxLayout({
+            style_class: 'climacn-detail-row',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        grid.add_child(row);
+        return row;
+    }
+
+    _createGridCell(row, title, initialValue) {
+        const cell = new St.BoxLayout({
+            style_class: 'climacn-detail-cell',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        cell.add_child(new St.Label({
+            text: title,
+            style_class: 'climacn-detail-label',
+            y_align: Clutter.ActorAlign.CENTER
+        }));
+        const value = new St.Label({
+            text: initialValue,
+            style_class: 'climacn-detail-value',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        cell.add_child(value);
+        row.add_child(cell);
+        return value;
+    }
+
+    _createExtraRow(menu, title) {
+        const row = new St.BoxLayout({
+            style_class: 'climacn-detail-row',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        row.add_child(new St.Label({
+            text: title,
+            style_class: 'climacn-detail-label',
+            y_align: Clutter.ActorAlign.CENTER
+        }));
+        const value = new St.Label({
+            text: '--',
+            style_class: 'climacn-detail-value',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        row.add_child(value);
+
+        const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        item.add_child(row);
+        menu.addMenuItem(item);
+        return value;
+    }
+
+    _buildForecast() {
         this._forecastContainer = new St.BoxLayout({
             style_class: 'climacn-forecast-box',
             vertical: true
         });
         this._forecastTitle = new St.Label({
-            text: '📅 未来 3 天预报',
+            text: _('未来 3 天预报'),
             style_class: 'climacn-forecast-title'
         });
         this._forecastContainer.add_child(this._forecastTitle);
@@ -273,42 +400,26 @@ export default class ClimaCNExtension extends Extension {
         });
         this._forecastContainer.add_child(this._forecastRowsBox);
 
-        const forecastItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
-        forecastItem.add_child(this._forecastContainer);
-        this._indicator.menu.addMenuItem(forecastItem);
-        // -----------------------------------------
-
-        this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
-        const refreshItem = new PopupMenu.PopupMenuItem(_('刷新'));
-        const refreshIcon = new St.Icon({
-            icon_name: 'view-refresh-symbolic',
-            style_class: 'climacn-refresh-icon'
-        });
-        refreshItem.add_child(refreshIcon);
-        refreshItem.connect('activate', () => this._fetchWeather());
-        this._indicator.menu.addMenuItem(refreshItem);
+        const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        item.add_child(this._forecastContainer);
+        this._indicator.menu.addMenuItem(item);
     }
 
-    _createDetailRow(parentBox, title, initialValue) {
-        const row = new St.BoxLayout({
-            style_class: 'climacn-detail-row',
-            y_align: Clutter.ActorAlign.CENTER
+    _buildFooter() {
+        // 数据归因：和风天气条款要求必须与数据共同显示
+        this._attributionLabel = new St.Label({
+            style_class: 'climacn-attribution',
+            text: ''
         });
-        const titleLabel = new St.Label({
-            text: `${title}:`,
-            style_class: 'climacn-detail-label',
-            y_align: Clutter.ActorAlign.CENTER
-        });
-        const valueLabel = new St.Label({
-            text: initialValue,
-            style_class: 'climacn-detail-value',
-            y_align: Clutter.ActorAlign.CENTER
-        });
-        row.add_child(titleLabel);
-        row.add_child(valueLabel);
-        parentBox.add_child(row);
-        return valueLabel;
+        this._attributionItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        this._attributionItem.add_child(this._attributionLabel);
+        this._attributionItem.visible = false;
+        this._indicator.menu.addMenuItem(this._attributionItem);
+
+        // PopupImageMenuItem 把图标放在文字左侧，比手动 add_child 更规整
+        this._refreshItem = new PopupMenu.PopupImageMenuItem(_('刷新'), 'view-refresh-symbolic');
+        this._refreshItem.connect('activate', () => this._fetchWeather());
+        this._indicator.menu.addMenuItem(this._refreshItem);
     }
 
     _buildSearchUI() {
@@ -325,8 +436,9 @@ export default class ClimaCNExtension extends Extension {
         entryItem.add_child(this._searchEntry);
         this._indicator.menu.addMenuItem(entryItem);
 
+        // 独立的类：climacn-detail-label 有固定宽度，会把状态文字挤变形
         this._searchStatusLabel = new St.Label({
-            style_class: 'climacn-detail-label'
+            style_class: 'climacn-search-status'
         });
         this._searchStatusLabel.hide();
         const statusItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
@@ -605,20 +717,32 @@ export default class ClimaCNExtension extends Extension {
         }
         return null;
     }
+    /* 统一切换图标：gicon 与 icon_name 互斥，切换时必须清空另一个，
+     * 否则从本地 SVG 换回内置图标时旧图标仍会显示。 */
+    _applyIcon(widget, gicon, fallbackName = 'weather-severe-alert-symbolic') {
+        if (gicon) {
+            widget.gicon = gicon;
+            widget.icon_name = null;
+        } else {
+            widget.gicon = null;
+            widget.icon_name = fallbackName;
+        }
+    }
+
     _updateUI(now, forecast) {
         // ---- 当前天气 ----
         const iconCode = now.icon || '999';
         const temp = now.temp || '--';
-        const iconPath = `${this.path}/icons/${iconCode}-symbolic.svg`;
-        const icon = this._createFileIcon(iconPath);
-        if (icon) {
-            this._weatherIcon.gicon = icon;
-        } else {
-            this._weatherIcon.icon_name = 'weather-severe-alert-symbolic';
-        }
+        const icon = this._createFileIcon(`${this.path}/icons/${iconCode}-symbolic.svg`);
 
+        // 顶栏
+        this._applyIcon(this._weatherIcon, icon);
         this._tempLabel.text = `${temp}°`;
-        this._weatherDescLabel.text = now.text || '--';
+        // 卡片头
+        this._applyIcon(this._headerIcon, icon);
+        this._headerTemp.text = `${temp}°`;
+        this._headerCondition.text = now.text || '--';
+
         this._feelsLikeLabel.text = now.feelsLike ? `${now.feelsLike}°` : '--°';
         this._humidityLabel.text = now.humidity ? `${now.humidity}%` : '--%';
         this._windLabel.text = `${now.windDir || '--'} ${now.windScale || '--'}级`;
@@ -668,9 +792,9 @@ export default class ClimaCNExtension extends Extension {
                 }
                 row.add_child(iconWidget);
 
-                // 温度范围
+                // 温度范围（单位与卡片头保持一致，不再单独写 °C）
                 const tempLabel = new St.Label({
-                    text: `${day.tempMin}°C / ${day.tempMax}°C`,
+                    text: `${day.tempMin}° / ${day.tempMax}°`,
                     style_class: 'climacn-forecast-temp',
                     y_align: Clutter.ActorAlign.CENTER
                 });
@@ -698,9 +822,11 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _showError(message = _('获取失败')) {
+        this._applyIcon(this._weatherIcon, null, 'dialog-error-symbolic');
+        this._applyIcon(this._headerIcon, null, 'dialog-error-symbolic');
         this._tempLabel.text = 'N/A';
-        this._weatherIcon.icon_name = 'dialog-error-symbolic';
-        this._weatherDescLabel.text = message;
+        this._headerTemp.text = 'N/A';
+        this._headerCondition.text = message;
         this._feelsLikeLabel.text = '--°';
         this._humidityLabel.text = '--%';
         this._windLabel.text = '--';
