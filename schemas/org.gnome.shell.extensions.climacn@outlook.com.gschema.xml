@@ -39,5 +39,18 @@
       <description>显示在菜单卡片头下方的城市名称。</description>
     </key>
 
+    <!-- 每日请求计数（用于配额保护，跨重启保留） -->
+    <key name="daily-request-count" type="i">
+      <default>0</default>
+      <summary>今日已发出的 API 请求数</summary>
+      <description>用于避免超出和风天气的每日配额。跨会话保留，按本地日期归零。</description>
+    </key>
+
+    <key name="daily-request-date" type="s">
+      <default>''</default>
+      <summary>请求计数对应的本地日期</summary>
+      <description>记录 daily-request-count 是哪一天的计数，日期变化时归零。</description>
+    </key>
+
   </schema>
 </schemalist>

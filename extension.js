@@ -11,9 +11,16 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 /* =====================================================================
- * 常量
+ * 刷新与配额策略
+ * 和风天气免费额度为每日 1000 次、每月 50000 次。每次刷新消耗 2 次请求
+ * （实时 + 预报），15 分钟间隔下约 192 次/天，余量充足。以下策略用于
+ * 防止连点、缩短间隔或长时间挂机把额度吃掉。
  * ===================================================================== */
-const UPDATE_INTERVAL_SEC = 15 * 60;
+const UPDATE_INTERVAL_SEC = 15 * 60;      // 插电时的自动刷新间隔
+const BATTERY_INTERVAL_SEC = 30 * 60;     // 电池供电时拉长，减少唤醒与请求
+const CACHE_TTL_SEC = 5 * 60;             // 数据新鲜期，期内自动刷新不再请求
+const MANUAL_COOLDOWN_SEC = 60;           // 手动刷新最小间隔，防止连点
+const DAILY_REQUEST_BUDGET = 800;         // 每日请求上限（限额 1000，留出余量）
 
 /* =====================================================================
  * 和风天气 v1 接口
@@ -88,6 +95,15 @@ function safeIconCode(code) {
     return /^[0-9A-Za-z]+$/.test(s) ? s : '999';
 }
 
+/* 每日请求计数的归零规则。抽成纯函数，便于脱离 Shell 环境验证。 */
+function currentRequestCount(storedDate, storedCount, today) {
+    return storedDate === today ? storedCount : 0;
+}
+
+function nextRequestCount(storedDate, storedCount, today) {
+    return storedDate === today ? storedCount + 1 : 1;
+}
+
 /* =====================================================================
  * CSV 行解析
  * 城市库中部分字段被引号包裹且内含逗号（如 "Taiwan, Province of China"），
@@ -140,6 +156,10 @@ export default class ClimaCNExtension extends Extension {
         this._cityData = null;
         this._isLoadingCities = false;
         this._requestSeq = 0;
+        this._lastFetchAt = 0;      // 上次发起请求的时刻（单调时钟，秒）
+        this._onBattery = false;
+        this._upower = null;
+        this._upowerSignalId = 0;
 
         this._settings = this.getSettings();
         this._apiKey = this._settings.get_string('api-key') || '';
@@ -203,8 +223,45 @@ export default class ClimaCNExtension extends Extension {
         this._theme.load_stylesheet(Gio.File.new_for_path(this._stylesheetPath));
 
         this._createIndicator();
+        this._initPowerMonitor();
         this._fetchWeather();
         this._startAutoRefresh();
+    }
+
+    /* 监听电源状态：电池供电时拉长刷新间隔，减少唤醒与请求。
+     * 走 UPower 的 D-Bus 属性，全程异步，不阻塞 Shell。
+     * 台式机或容器里没有 UPower 时静默按插电处理。 */
+    _initPowerMonitor() {
+        Gio.DBusProxy.new_for_bus(
+            Gio.BusType.SYSTEM,
+            Gio.DBusProxyFlags.NONE,
+            null,
+            'org.freedesktop.UPower',
+            '/org/freedesktop/UPower',
+            'org.freedesktop.UPower',
+            null,
+            (source, result) => {
+                // 回调期间扩展可能已被禁用
+                if (!this._enabled) return;
+                try {
+                    this._upower = Gio.DBusProxy.new_for_bus_finish(result);
+                } catch (e) {
+                    // 没有 UPower（台式机 / 容器）不是错误，按插电处理即可
+                    this._upower = null;
+                    return;
+                }
+                this._onBattery = this._upower.get_cached_property('OnBattery')?.get_boolean() ?? false;
+                this._upowerSignalId = this._upower.connect('g-properties-changed', () => {
+                    if (!this._enabled) return;
+                    const onBattery = this._upower?.get_cached_property('OnBattery')?.get_boolean() ?? false;
+                    if (onBattery === this._onBattery) return;
+                    this._onBattery = onBattery;
+                    this._restartAutoRefresh();
+                });
+                // 拿到真实电源状态后按新间隔重建定时器
+                this._restartAutoRefresh();
+            }
+        );
     }
 
     disable() {
@@ -275,6 +332,14 @@ export default class ClimaCNExtension extends Extension {
             this._settings = null;
         }
 
+        if (this._upower) {
+            if (this._upowerSignalId) {
+                this._upower.disconnect(this._upowerSignalId);
+                this._upowerSignalId = 0;
+            }
+            this._upower = null;
+        }
+
         // 释放全部 UI 引用，避免反复 enable/disable 后残留 actor 导致内存泄漏
         this._weatherIcon = null;
         this._tempLabel = null;
@@ -295,6 +360,8 @@ export default class ClimaCNExtension extends Extension {
         this._precipLabel = null;
         this._attributionLabel = null;
         this._attributionItem = null;
+        this._noticeLabel = null;
+        this._noticeItem = null;
         this._refreshItem = null;
         this._forecastContainer = null;
         this._forecastTitle = null;
@@ -313,6 +380,9 @@ export default class ClimaCNExtension extends Extension {
         this._longitude = 0;
         this._currentCityName = null;
         this._writingSettings = false;
+        this._lastFetchAt = 0;
+        this._onBattery = false;
+        this._upowerSignalId = 0;
         this._stylesheetPath = null;
         this._theme = null;
         this._cancellable = null;
@@ -509,6 +579,16 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _buildFooter() {
+        // 额度用尽等状态提示，平时隐藏
+        this._noticeLabel = new St.Label({
+            style_class: 'climacn-notice',
+            text: ''
+        });
+        this._noticeItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        this._noticeItem.add_child(this._noticeLabel);
+        this._noticeItem.visible = false;
+        this._indicator.menu.addMenuItem(this._noticeItem);
+
         // 数据归因：和风天气条款要求必须与数据共同显示
         this._attributionLabel = new St.Label({
             style_class: 'climacn-attribution',
@@ -521,8 +601,18 @@ export default class ClimaCNExtension extends Extension {
 
         // PopupImageMenuItem 把图标放在文字左侧，比手动 add_child 更规整
         this._refreshItem = new PopupMenu.PopupImageMenuItem(_('刷新'), 'view-refresh-symbolic');
-        this._refreshItem.connect('activate', () => this._fetchWeather());
+        this._refreshItem.connect('activate', () => this._onManualRefresh());
         this._indicator.menu.addMenuItem(this._refreshItem);
+    }
+
+    /* 预算用尽时给出提示，避免用户以为扩展坏了 */
+    _updateNotice() {
+        if (!this._noticeItem)
+            return;
+        const exhausted = this._requestBudgetExhausted();
+        this._noticeItem.visible = exhausted;
+        if (exhausted)
+            this._noticeLabel.text = _('今日请求已达上限，自动刷新已暂停');
     }
 
     _buildSearchUI() {
@@ -717,15 +807,90 @@ export default class ClimaCNExtension extends Extension {
         this._fetchWeather();
     }
 
+    /* 当前生效的自动刷新间隔：电池供电时拉长 */
+    _intervalSec() {
+        return this._onBattery ? BATTERY_INTERVAL_SEC : UPDATE_INTERVAL_SEC;
+    }
+
     /* 幂等：已有定时器就不重复创建。
      * 配置变更后也会调用它，用来恢复此前被 401/403 停掉的定时器。 */
     _startAutoRefresh() {
         if (this._timeoutId)
             return;
-        this._timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, UPDATE_INTERVAL_SEC, () => {
-            this._fetchWeather();
+        this._timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, this._intervalSec(), () => {
+            this._autoRefreshTick();
             return GLib.SOURCE_CONTINUE;
         });
+    }
+
+    /* 间隔会随电源状态变化，切换时重建定时器 */
+    _restartAutoRefresh() {
+        if (this._timeoutId) {
+            GLib.Source.remove(this._timeoutId);
+            this._timeoutId = 0;
+        }
+        if (!this._enabled)
+            return;
+        this._startAutoRefresh();
+    }
+
+    _autoRefreshTick() {
+        // 今日额度用尽：不再自动请求，等次日归零或用户手动刷新
+        if (this._requestBudgetExhausted()) {
+            this._updateNotice();
+            return;
+        }
+        // 数据仍在新鲜期内就不请求。15 分钟间隔下不会触发，
+        // 这是防止间隔被改小或系统时间回拨的兜底。
+        if (this._secondsSinceFetch() < CACHE_TTL_SEC)
+            return;
+        this._fetchWeather();
+    }
+
+    /* 手动刷新：60 秒内忽略，防止连点把额度刷掉。
+     * 改 API Key / Host 走的是配置变更那条路径，不受此限，改完能立刻生效。 */
+    _onManualRefresh() {
+        if (!this._enabled)
+            return;
+        if (this._secondsSinceFetch() < MANUAL_COOLDOWN_SEC)
+            return;
+        this._fetchWeather();
+    }
+
+    _secondsSinceFetch() {
+        return GLib.get_monotonic_time() / 1e6 - this._lastFetchAt;
+    }
+
+    /* ---- 每日请求预算 ---- */
+
+    _todayLocal() {
+        return GLib.DateTime.new_now_local().format('%Y-%m-%d');
+    }
+
+    _dailyCount() {
+        if (!this._settings)
+            return 0;
+        return currentRequestCount(
+            this._settings.get_string('daily-request-date'),
+            this._settings.get_int('daily-request-count'),
+            this._todayLocal());
+    }
+
+    _requestBudgetExhausted() {
+        return this._dailyCount() >= DAILY_REQUEST_BUDGET;
+    }
+
+    /* 每发出一个请求就记一次。计数写入 GSettings，重启 Shell 后仍有效。 */
+    _countRequest() {
+        if (!this._settings)
+            return;
+        const today = this._todayLocal();
+        const next = nextRequestCount(
+            this._settings.get_string('daily-request-date'),
+            this._settings.get_int('daily-request-count'),
+            today);
+        this._settings.set_string('daily-request-date', today);
+        this._settings.set_int('daily-request-count', next);
     }
 
     /* v1 不再用响应体里的 code 字段表示结果，改看 HTTP 状态码。
@@ -773,6 +938,9 @@ export default class ClimaCNExtension extends Extension {
         const message = Soup.Message.new('GET', url);
         if (!message) return;
         message.request_headers.append('X-Qw-Api-Key', this._apiKey);
+
+        this._lastFetchAt = GLib.get_monotonic_time() / 1e6;
+        this._countRequest();
 
         // 请求序号：快速连续切换城市时，先发的请求可能后返回，
         // 若不丢弃过期响应，会出现"标题是新城市、数据是旧城市"的错配
@@ -823,6 +991,7 @@ export default class ClimaCNExtension extends Extension {
             return;
         }
         message.request_headers.append('X-Qw-Api-Key', this._apiKey);
+        this._countRequest();
 
         this._session.send_and_read_async(
             message,
@@ -921,6 +1090,9 @@ export default class ClimaCNExtension extends Extension {
             this._attributionLabel.text = _('和风天气');
             this._attributionItem.visible = true;
         }
+
+        // 跨天后额度恢复，提示需要跟着消失
+        this._updateNotice();
 
         // ---- 未来3天预报 ----
         if (this._forecastRowsBox) {
