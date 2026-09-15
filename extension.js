@@ -30,9 +30,9 @@ const AQI_MAX_FAILURES = 2;               // 连续失败几次后不再请求�
 const FORECAST_DAYS = 10;                 // 和风每日预报上限即 10 天，趋势折线用它
 const FORECAST_ROWS = 3;                  // 逐日行只展开前 3 天
 const SUN_ARC_HEIGHT = 46;                // 日出日落弧线的高度（逻辑像素）
-const TREND_CHART_HEIGHT = 44;            // 10 天趋势折线的高度（逻辑像素）
-const TREND_CHART_WIDTH = 260;            // 折线宽度：放在子菜单里，需显式指定
-const TREND_LABEL_PX = 9;                 // 折线图标注字号（逻辑像素）
+const TREND_CHART_HEIGHT = 64;            // 折线高度：上下各留一行数字的位置
+const TREND_CHART_WIDTH = 300;            // 折线宽度：放在子菜单里，需显式指定
+const TREND_LABEL_PX = 8;                 // 折线数值标注的字号（逻辑像素）
 const OPEN_METEO_HOST = 'https://api.open-meteo.com';
 
 /* =====================================================================
@@ -372,12 +372,12 @@ function openMeteoAsQweatherDaily(json) {
     });
 }
 
-/* 色环中心数值所用的字体描述。两个坑都在这里：
+/* Cairo 里画文字所用的字体描述。两个坑都在这里：
  * 1. 必须带字体族——只用 FontDescription.new() 得到的描述没有族；
  * 2. set_absolute_size 的单位是 Pango 单位，须乘 PANGO_SCALE。
  *    传裸像素值会得到 0.02pt 的字号，实测测量宽度为 0，文字完全不可见。
  * 优先继承主题字体，取不到时退回 fontconfig 的通用族名。 */
-function aqiFontDescription(themeFont, scaleFactor) {
+function cairoFontDescription(themeFont, sizePx, scaleFactor) {
     let font = null;
     try {
         font = themeFont?.copy() ?? null;
@@ -386,8 +386,16 @@ function aqiFontDescription(themeFont, scaleFactor) {
     }
     if (!font || !font.get_family())
         font = Pango.FontDescription.from_string('Sans');
-    font.set_absolute_size(Math.round(AQI_FONT_PX * scaleFactor) * Pango.SCALE);
+    font.set_absolute_size(Math.round(sizePx * scaleFactor) * Pango.SCALE);
     return font;
+}
+
+/* 以 (x, y) 为中心画一段文字。y 用文字高度的一半做基线校正。 */
+function drawCenteredText(cr, layout, text, x, y) {
+    layout.set_text(String(text), -1);
+    const [textW, textH] = layout.get_pixel_size();
+    cr.moveTo(Math.round(x - textW / 2), Math.round(y - textH / 2));
+    PangoCairo.show_layout(cr, layout);
 }
 
 /* =====================================================================
@@ -1610,7 +1618,7 @@ export default class ClimaCNExtension extends Extension {
             else
                 cr.setSourceRGBA(0.5, 0.5, 0.5, 1);
 
-            // 主题字体取不到时不能让绘制失败，交给 aqiFontDescription 兜底
+            // 主题字体取不到时不能让绘制失败，交给 cairoFontDescription 兜底
             let themeFont = null;
             try {
                 themeFont = area.get_theme_node().get_font();
@@ -1618,7 +1626,7 @@ export default class ClimaCNExtension extends Extension {
                 themeFont = null;
             }
             const layout = PangoCairo.create_layout(cr);
-            layout.set_font_description(aqiFontDescription(themeFont, scaleFactor));
+            layout.set_font_description(cairoFontDescription(themeFont, AQI_FONT_PX, scaleFactor));
             layout.set_text(aqi.display, -1);
             const [textW, textH] = layout.get_pixel_size();
             cr.moveTo(Math.round(cx - textW / 2), Math.round(cy - textH / 2));
@@ -1669,15 +1677,16 @@ export default class ClimaCNExtension extends Extension {
             // 太阳圆点
             cr.setSourceRGBA(1.0, 0.72, 0.2, alpha);
             cr.arc(cx + radius * Math.cos(theta), cy + radius * Math.sin(theta),
-                   Math.max(2.5, 3.2 * scaleFactor), 0, 2 * Math.PI);
+                   Math.max(3.5, 4.5 * scaleFactor), 0, 2 * Math.PI);
             cr.fill();
         } finally {
             cr.$dispose();
         }
     }
 
-    /* 10 天趋势折线：最高温与最低温两条线，各带端点圆点。
-     * 纵向范围按实际数据自动缩放。折线只表达走势，具体数值看上方逐日行。 */
+    /* 10 天趋势折线：最高温与最低温两条线，每个点带圆点和温度数字。
+     * 最高温的数字画在点的上方，最低温画在下方，两者不会互相压住。
+     * 上下各预留一行文字的高度，纵向绘图区据此收缩。 */
     _drawTrendChart() {
         const area = this._trendArea;
         if (!area)
@@ -1689,10 +1698,15 @@ export default class ClimaCNExtension extends Extension {
         const cr = area.get_context();
         try {
             const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
-            const padX = 6 * scaleFactor;
-            const padY = 5 * scaleFactor;
+            const themeNode = area.get_theme_node();
+            const dotR = Math.max(1.5, 1.8 * scaleFactor);
+            const labelH = TREND_LABEL_PX * scaleFactor + 2;
+            const padX = 10 * scaleFactor;
+            // 上下各留出「圆点半径 + 一行数字」，避免数字被裁掉
+            const plotTop = dotR + labelH + 2;
+            const plotBottom = height - dotR - labelH - 2;
             const plotW = width - 2 * padX;
-            const plotH = height - 2 * padY;
+            const plotH = plotBottom - plotTop;
             if (plotW <= 0 || plotH <= 0)
                 return;
 
@@ -1703,7 +1717,10 @@ export default class ClimaCNExtension extends Extension {
             const span = hi - lo || 1;   // 全平的时候避免除零
 
             const xAt = i => padX + (plotW * i) / (points.length - 1);
-            const yAt = v => padY + plotH * (1 - (v - lo) / span);
+            const yAt = v => plotTop + plotH * (1 - (v - lo) / span);
+
+            const HIGH = [0.95, 0.55, 0.20, 0.95];
+            const LOW = [0.30, 0.60, 0.95, 0.95];
 
             const polyline = (values, rgba) => {
                 cr.setSourceRGBA(rgba[0], rgba[1], rgba[2], rgba[3]);
@@ -1715,20 +1732,35 @@ export default class ClimaCNExtension extends Extension {
                 cr.stroke();
             };
 
-            // 最高温暖色、最低温冷色，深浅主题下都够区分
-            const HIGH = [0.95, 0.55, 0.20, 0.95];
-            const LOW = [0.30, 0.60, 0.95, 0.95];
             polyline(highs, HIGH);
             polyline(lows, LOW);
 
-            // 每个数据点的圆点
-            const dot = Math.max(1.5, 1.8 * scaleFactor);
+            // 数据点
             for (const [values, rgba] of [[highs, HIGH], [lows, LOW]]) {
                 cr.setSourceRGBA(rgba[0], rgba[1], rgba[2], 1);
                 for (let i = 0; i < values.length; i++) {
-                    cr.arc(xAt(i), yAt(values[i]), dot, 0, 2 * Math.PI);
+                    cr.arc(xAt(i), yAt(values[i]), dotR, 0, 2 * Math.PI);
                     cr.fill();
                 }
+            }
+
+            // 数字标注与折线同色，读起来能直接对应到是哪条线
+            const layout = PangoCairo.create_layout(cr);
+            let themeFont = null;
+            try {
+                themeFont = themeNode.get_font();
+            } catch (_e) {
+                themeFont = null;
+            }
+            layout.set_font_description(cairoFontDescription(themeFont, TREND_LABEL_PX, scaleFactor));
+
+            for (let i = 0; i < points.length; i++) {
+                cr.setSourceRGBA(HIGH[0], HIGH[1], HIGH[2], 0.95);
+                drawCenteredText(cr, layout, `${Math.round(highs[i])}°`,
+                                 xAt(i), yAt(highs[i]) - dotR - labelH / 2);
+                cr.setSourceRGBA(LOW[0], LOW[1], LOW[2], 0.95);
+                drawCenteredText(cr, layout, `${Math.round(lows[i])}°`,
+                                 xAt(i), yAt(lows[i]) + dotR + labelH / 2);
             }
         } finally {
             cr.$dispose();
