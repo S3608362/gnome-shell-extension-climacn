@@ -27,6 +27,12 @@ const DAILY_REQUEST_BUDGET = 800;         // 每日请求上限（限额 1000，
 const AQI_RING_SIZE = 34;                 // AQI 色环的逻辑像素尺寸（绘制时按缩放比放大）
 const AQI_FONT_PX = 10;                   // 色环中心数值的字号（逻辑像素）
 const AQI_MAX_FAILURES = 2;               // 连续失败几次后不再请求空气质量
+const FORECAST_DAYS = 10;                 // 和风每日预报上限即 10 天，趋势折线用它
+const FORECAST_ROWS = 3;                  // 逐日行只展开前 3 天
+const SUN_ARC_HEIGHT = 46;                // 日出日落弧线的高度（逻辑像素）
+const TREND_CHART_HEIGHT = 44;            // 10 天趋势折线的高度（逻辑像素）
+const TREND_LABEL_PX = 9;                 // 折线图标注字号（逻辑像素）
+const OPEN_METEO_HOST = 'https://api.open-meteo.com';
 
 /* =====================================================================
  * 和风天气 v1 接口
@@ -37,8 +43,10 @@ function getWeatherUrl(host, lat, lon) {
     return `${host}/weather/v1/current/${formatCoord(lat)}/${formatCoord(lon)}?localTime=true`;
 }
 
+/* 一次取满 10 天：界面只用前 3 天做逐日行，其余用于 10 天趋势折线；
+ * 日出日落也从同一个响应的 astro 取，不额外增加请求。 */
 function getForecastUrl(host, lat, lon) {
-    return `${host}/weather/v1/daily/${formatCoord(lat)}/${formatCoord(lon)}?days=3&localTime=true`;
+    return `${host}/weather/v1/daily/${formatCoord(lat)}/${formatCoord(lon)}?days=${FORECAST_DAYS}&localTime=true`;
 }
 
 /* 文档要求经纬度最多两位小数 */
@@ -199,6 +207,170 @@ function formatPressureTrend(trend) {
     return `${trend.dir === 'rising' ? '↑' : '↓'}${Math.abs(trend.delta).toFixed(1)}`;
 }
 
+/* =====================================================================
+ * 日出日落
+ * 时间取自每日预报的 astro 字段，形如 "2026-09-15T06:12+08:00"。
+ * ===================================================================== */
+function parseClockMinutes(iso) {
+    const m = /T(\d{2}):(\d{2})/.exec(String(iso ?? ''));
+    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+/* 分钟数 → HH:MM。
+ * 必须先挡掉 null：Number(null) 是 0 且有限，会被当成 00:00。 */
+function formatClock(minutes) {
+    if (minutes === null || minutes === undefined || minutes === '')
+        return '--:--';
+    const n = Number(minutes);
+    if (!Number.isFinite(n))
+        return '--:--';
+    const h = Math.floor(n / 60) % 24;
+    const m = Math.round(n % 60);
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+/* 取当天的日出日落（分钟数）。日落早于日出说明数据异常，按无数据处理。 */
+function parseSunTimes(days) {
+    const astro = Array.isArray(days) ? days[0]?.astro : null;
+    const sunrise = parseClockMinutes(astro?.sunrise);
+    const sunset = parseClockMinutes(astro?.sunset);
+    if (sunrise === null || sunset === null || sunset <= sunrise)
+        return null;
+    return { sunrise, sunset };
+}
+
+/* 太阳在日出日落之间的位置：0 = 日出，1 = 日落。
+ * 夜间把位置夹到两端并标记 isDay=false，界面据此弱化显示。 */
+function sunArcPosition(nowMinutes, sunTimes) {
+    if (!sunTimes)
+        return null;
+    const { sunrise, sunset } = sunTimes;
+    const ratio = (nowMinutes - sunrise) / (sunset - sunrise);
+    return {
+        ratio: Math.min(Math.max(ratio, 0), 1),
+        isDay: nowMinutes >= sunrise && nowMinutes <= sunset,
+    };
+}
+
+/* 折线取值：每天的最高/最低温。缺数据的日子跳过。 */
+function parseTrendPoints(days) {
+    if (!Array.isArray(days))
+        return [];
+    return days
+        .map(d => ({
+            min: Number(d?.temperatureMin?.value),
+            max: Number(d?.temperatureMax?.value),
+        }))
+        .filter(p => Number.isFinite(p.min) && Number.isFinite(p.max));
+}
+
+/* =====================================================================
+ * Open-Meteo 兜底
+ * 仅在用户于首选项中开启、且和风不可用（未配置 Key 或额度用尽）时启用。
+ * 它用的是 WMO 天气代码，而本地图标是和风代码，需要转换。
+ * ===================================================================== */
+const WMO_TO_QWEATHER_DAY = {
+    0: '100', 1: '102', 2: '101', 3: '104',
+    45: '501', 48: '501',
+    51: '309', 53: '309', 55: '309', 56: '313', 57: '313',
+    61: '305', 63: '306', 65: '307', 66: '313', 67: '313',
+    71: '400', 73: '401', 75: '402', 77: '407',
+    80: '300', 81: '301', 82: '310',
+    85: '407', 86: '407',
+    95: '302', 96: '304', 99: '304',
+};
+
+/* 夜间只有晴/少云/多云有专门图标，其余沿用白天图标 */
+const WMO_TO_QWEATHER_NIGHT = { 0: '150', 1: '152', 2: '151' };
+
+const WMO_TEXT_ZH = {
+    0: '晴', 1: '少云', 2: '多云', 3: '阴',
+    45: '雾', 48: '雾凇',
+    51: '毛毛雨', 53: '毛毛雨', 55: '毛毛雨', 56: '冻毛毛雨', 57: '冻毛毛雨',
+    61: '小雨', 63: '中雨', 65: '大雨', 66: '冻雨', 67: '冻雨',
+    71: '小雪', 73: '中雪', 75: '大雪', 77: '米雪',
+    80: '阵雨', 81: '强阵雨', 82: '暴雨',
+    85: '阵雪', 86: '强阵雪',
+    95: '雷阵雨', 96: '雷阵雨伴冰雹', 99: '雷阵雨伴冰雹',
+};
+
+function wmoToQweatherCode(code, isDay = true) {
+    const c = Number(code);
+    if (!isDay && WMO_TO_QWEATHER_NIGHT[c])
+        return WMO_TO_QWEATHER_NIGHT[c];
+    return WMO_TO_QWEATHER_DAY[c] ?? '999';
+}
+
+function wmoToText(code) {
+    return WMO_TEXT_ZH[Number(code)] ?? '--';
+}
+
+const COMPASS_CODES = ['n', 'nne', 'ne', 'ene', 'e', 'ese', 'se', 'sse',
+                       's', 'ssw', 'sw', 'wsw', 'w', 'wnw', 'nw', 'nnw'];
+
+/* Open-Meteo 给的是风向角度，和风给的是方位代码，这里换算过去 */
+function degreesToCompass(degrees) {
+    const d = Number(degrees);
+    if (!Number.isFinite(d))
+        return 'none';
+    const normalized = ((d % 360) + 360) % 360;
+    return COMPASS_CODES[Math.round(normalized / 22.5) % 16];
+}
+
+function getOpenMeteoUrl(lat, lon) {
+    const query = [
+        'current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,' +
+            'wind_speed_10m,wind_direction_10m,surface_pressure,is_day',
+        'daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset',
+        `forecast_days=${FORECAST_DAYS}`,
+        'timezone=auto',
+    ].join('&');
+    return `${OPEN_METEO_HOST}/v1/forecast?latitude=${formatCoord(lat)}&longitude=${formatCoord(lon)}&${query}`;
+}
+
+/* 把 Open-Meteo 的响应整理成和风 v1 的形状。
+ * 这样 _updateUI 只认一种数据结构，不必在界面代码里到处判断来源；
+ * 代价是多一层转换，但比在每个字段处分叉要清楚得多。 */
+function openMeteoAsQweatherCurrent(json) {
+    const cur = json?.current ?? {};
+    const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
+    return {
+        condition: {
+            code: wmoToQweatherCode(cur.weather_code, cur.is_day !== 0),
+            text: wmoToText(cur.weather_code),
+        },
+        temperature: { value: num(cur.temperature_2m) },
+        feelsLike: { value: num(cur.apparent_temperature) },
+        // Open-Meteo 的湿度已是 0–100，转成和风的 0–1 以免下游重复换算
+        humidity: num(cur.relative_humidity_2m) === null ? null : num(cur.relative_humidity_2m) / 100,
+        wind: {
+            direction: { compass: degreesToCompass(cur.wind_direction_10m) },
+            scale: null,   // Open-Meteo 不提供蒲福风级，界面显示 --
+        },
+        pressure: { value: num(cur.surface_pressure), unit: 'hPa' },
+    };
+}
+
+function openMeteoAsQweatherDaily(json) {
+    const d = json?.daily ?? {};
+    const times = Array.isArray(d.time) ? d.time : [];
+    return times.map((date, i) => {
+        const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
+        return {
+            astro: { sunrise: d.sunrise?.[i], sunset: d.sunset?.[i] },
+            daytime: {
+                condition: {
+                    code: wmoToQweatherCode(d.weather_code?.[i], true),
+                    text: wmoToText(d.weather_code?.[i]),
+                },
+            },
+            temperatureMin: { value: num(d.temperature_2m_min?.[i]) },
+            temperatureMax: { value: num(d.temperature_2m_max?.[i]) },
+            _date: date,   // 保留原始日期，趋势折线用它标注
+        };
+    });
+}
+
 /* 色环中心数值所用的字体描述。两个坑都在这里：
  * 1. 必须带字体族——只用 FontDescription.new() 得到的描述没有族；
  * 2. set_absolute_size 的单位是 Pango 单位，须乘 PANGO_SCALE。
@@ -286,6 +458,9 @@ export default class ClimaCNExtension extends Extension {
         this._pressureHistory = parsePressureHistory(this._settings.get_string('pressure-history'));
         this._aqi = null;
         this._aqiFailCount = 0;
+        this._sunPosition = null;
+        this._trendPoints = [];
+        this._usingFallback = false;
 
         // _selectCity() 会连续写三个键，期间置位以免监听器重复发起请求
         this._writingSettings = false;
@@ -463,7 +638,12 @@ export default class ClimaCNExtension extends Extension {
         this._headerIcon = null;
         this._headerTemp = null;
         this._headerCondition = null;
+        this._aqiGroup = null;
         this._aqiArea = null;
+        this._sunriseLabel = null;
+        this._sunArcArea = null;
+        this._sunsetLabel = null;
+        this._sunArcItem = null;
         this._cityLabel = null;
         this._feelsLikeLabel = null;
         this._humidityLabel = null;
@@ -484,6 +664,8 @@ export default class ClimaCNExtension extends Extension {
         this._forecastContainer = null;
         this._forecastTitle = null;
         this._forecastRowsBox = null;
+        this._trendTitle = null;
+        this._trendArea = null;
         this._searchEntry = null;
         this._searchStatusLabel = null;
         this._searchResultsSection = null;
@@ -501,6 +683,9 @@ export default class ClimaCNExtension extends Extension {
         this._aqi = null;
         this._aqiFailCount = 0;
         this._pressureHistory = [];
+        this._sunPosition = null;
+        this._trendPoints = [];
+        this._usingFallback = false;
         this._lastFetchAt = 0;
         this._onBattery = false;
         this._upowerSignalId = 0;
@@ -543,8 +728,46 @@ export default class ClimaCNExtension extends Extension {
         this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         this._buildDetails();
+        this._buildSunArc();
         this._buildForecast();
         this._buildFooter();
+    }
+
+    /* 日出日落弧线：半圆轨道 + 太阳位置圆点，两侧标出日出日落时刻。
+     * 数据来自每日预报的 astro，不需要额外请求。 */
+    _buildSunArc() {
+        const box = new St.BoxLayout({
+            style_class: 'climacn-sun-arc',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+
+        this._sunriseLabel = new St.Label({
+            text: '--:--',
+            style_class: 'climacn-sun-time',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        box.add_child(this._sunriseLabel);
+
+        this._sunArcArea = new St.DrawingArea({
+            style_class: 'climacn-sun-arc-canvas',
+            x_expand: true,
+            height: SUN_ARC_HEIGHT,
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        this._sunArcArea.connect('repaint', () => this._drawSunArc());
+        box.add_child(this._sunArcArea);
+
+        this._sunsetLabel = new St.Label({
+            text: '--:--',
+            style_class: 'climacn-sun-time',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        box.add_child(this._sunsetLabel);
+
+        this._sunArcItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        this._sunArcItem.add_child(box);
+        this._sunArcItem.visible = false;   // 没有 astro 数据时整行隐藏
+        this._indicator.menu.addMenuItem(this._sunArcItem);
     }
 
     /* 卡片头：大图标 + 大号温度 + 天气状况，城市名降为下方小字。
@@ -580,8 +803,19 @@ export default class ClimaCNExtension extends Extension {
         });
         row.add_child(this._headerCondition);
 
-        // 弹性留白把 AQI 色环推到行尾；没有空气质量数据时整体隐藏
+        // 弹性留白把 AQI 推到行尾；取不到空气质量数据时整组隐藏
         row.add_child(new St.Widget({ x_expand: true }));
+        this._aqiGroup = new St.BoxLayout({
+            style_class: 'climacn-aqi-group',
+            y_align: Clutter.ActorAlign.CENTER,
+            visible: false
+        });
+        // 图标主题里没有语义正确的空气质量图标，用 "AQI" 三个字母更易辨识
+        this._aqiGroup.add_child(new St.Label({
+            text: 'AQI',
+            style_class: 'climacn-aqi-label',
+            y_align: Clutter.ActorAlign.CENTER
+        }));
         this._aqiArea = new St.DrawingArea({
             style_class: 'climacn-aqi-ring',
             width: AQI_RING_SIZE,
@@ -589,8 +823,8 @@ export default class ClimaCNExtension extends Extension {
             y_align: Clutter.ActorAlign.CENTER
         });
         this._aqiArea.connect('repaint', () => this._drawAqiRing());
-        this._aqiArea.visible = false;
-        row.add_child(this._aqiArea);
+        this._aqiGroup.add_child(this._aqiArea);
+        row.add_child(this._aqiGroup);
 
         box.add_child(row);
 
@@ -705,6 +939,24 @@ export default class ClimaCNExtension extends Extension {
             vertical: true
         });
         this._forecastContainer.add_child(this._forecastRowsBox);
+
+        // 10 天趋势折线。数据来自同一个每日预报响应（days=10），
+        // 逐日行只展开前 3 天，剩下的用折线看走势。
+        this._trendTitle = new St.Label({
+            text: _('10 天趋势'),
+            style_class: 'climacn-trend-title'
+        });
+        this._trendTitle.visible = false;
+        this._forecastContainer.add_child(this._trendTitle);
+
+        this._trendArea = new St.DrawingArea({
+            style_class: 'climacn-trend-chart',
+            x_expand: true,
+            height: TREND_CHART_HEIGHT
+        });
+        this._trendArea.connect('repaint', () => this._drawTrendChart());
+        this._trendArea.visible = false;
+        this._forecastContainer.add_child(this._trendArea);
 
         const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
         item.add_child(this._forecastContainer);
@@ -1053,8 +1305,66 @@ export default class ClimaCNExtension extends Extension {
         this._showError(`请求失败（HTTP ${status}）`);
     }
 
+    /* 是否改走 Open-Meteo：需用户在首选项里显式开启，且和风确实不可用
+     * （凭据缺失或当日额度已用尽）。默认关闭，不做无谓的第三方请求。 */
+    _shouldUseFallback() {
+        if (!this._settings?.get_boolean('use-open-meteo-fallback'))
+            return false;
+        return !this._apiKey || !this._host || this._requestBudgetExhausted();
+    }
+
+    /* Open-Meteo 不需要凭据，响应先归一化成和风的形状再交给 _updateUI。
+     * 它不消耗和风额度，因此不计入每日请求数。 */
+    _fetchFromOpenMeteo() {
+        const seq = ++this._requestSeq;
+        this._lastFetchAt = GLib.get_monotonic_time() / 1e6;
+
+        const message = Soup.Message.new('GET', getOpenMeteoUrl(this._latitude, this._longitude));
+        if (!message)
+            return;
+
+        this._session.send_and_read_async(
+            message,
+            Soup.MessagePriority.NORMAL,
+            this._cancellable,
+            (session, result) => {
+                try {
+                    const bytes = session.send_and_read_finish(result);
+                    if (!this._enabled || this._cancellable?.is_cancelled()) return;
+                    if (seq !== this._requestSeq) return;
+
+                    if (message.status_code !== Soup.Status.OK) {
+                        console.error(`[ClimaCN] Open-Meteo HTTP ${message.status_code}`);
+                        this._showError(_('备用数据源请求失败'));
+                        return;
+                    }
+                    const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
+                    const current = openMeteoAsQweatherCurrent(json);
+                    const daily = openMeteoAsQweatherDaily(json);
+                    if (daily.length === 0) {
+                        this._showError(_('备用数据源返回数据不完整'));
+                        return;
+                    }
+                    this._usingFallback = true;
+                    this._updateUI(current, daily, null);   // 兜底不提供 AQI
+                } catch (e) {
+                    if (!this._enabled) return;
+                    console.error(`[ClimaCN] Open-Meteo parse error: ${e}`);
+                    this._showError();
+                }
+            }
+        );
+    }
+
     _fetchWeather() {
         if (!this._enabled) return;
+
+        // 和风不可用且用户允许兜底时，改走 Open-Meteo
+        if (this._shouldUseFallback()) {
+            this._fetchFromOpenMeteo();
+            return;
+        }
+
         if (!this._apiKey || this._apiKey.trim() === '') {
             this._showError(_('请在设置中配置 API Key'));
             return;
@@ -1108,6 +1418,7 @@ export default class ClimaCNExtension extends Extension {
                     const settle = () => {
                         if (!('forecast' in pending) || !('aqi' in pending)) return;
                         if (!this._enabled || seq !== this._requestSeq) return;
+                        this._usingFallback = false;   // 本次数据来自和风
                         this._updateUI(json, pending.forecast, pending.aqi);
                     };
                     this._fetchForecast(seq, (forecast) => {
@@ -1307,6 +1618,112 @@ export default class ClimaCNExtension extends Extension {
         }
     }
 
+    /* 日出日落弧线：上半圆轨道 + 已走过的弧段高亮 + 太阳圆点。
+     * 夜间把太阳点弱化并夹在两端。 */
+    _drawSunArc() {
+        const area = this._sunArcArea;
+        if (!area)
+            return;
+        const [width, height] = area.get_surface_size();
+        const cr = area.get_context();
+        try {
+            const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
+            const lineWidth = Math.max(1.5, 2 * scaleFactor);
+            const pad = lineWidth + 3 * scaleFactor;
+            const radius = Math.min((width - 2 * pad) / 2, height - 2 * pad);
+            if (radius <= 0)
+                return;
+            const cx = width / 2;
+            const cy = height - pad;   // 圆心落在底边，画出来就是上半圆
+
+            cr.setLineWidth(lineWidth);
+            cr.setLineCap(Cairo.LineCap.ROUND);
+
+            // 整条轨道。cairo 的角度以 y 轴向下为正，Math.PI→2*Math.PI 即上半圆
+            cr.setSourceRGBA(0.5, 0.5, 0.5, 0.25);
+            cr.arc(cx, cy, radius, Math.PI, 2 * Math.PI);
+            cr.stroke();
+
+            const pos = this._sunPosition;
+            if (!pos)
+                return;
+            const theta = Math.PI + pos.ratio * Math.PI;
+            const alpha = pos.isDay ? 1 : 0.3;
+
+            // 已经走过的弧段
+            cr.setSourceRGBA(1.0, 0.72, 0.2, alpha * 0.9);
+            cr.arc(cx, cy, radius, Math.PI, theta);
+            cr.stroke();
+
+            // 太阳圆点
+            cr.setSourceRGBA(1.0, 0.72, 0.2, alpha);
+            cr.arc(cx + radius * Math.cos(theta), cy + radius * Math.sin(theta),
+                   Math.max(2.5, 3.2 * scaleFactor), 0, 2 * Math.PI);
+            cr.fill();
+        } finally {
+            cr.$dispose();
+        }
+    }
+
+    /* 10 天趋势折线：最高温与最低温两条线，各带端点圆点。
+     * 纵向范围按实际数据自动缩放。折线只表达走势，具体数值看上方逐日行。 */
+    _drawTrendChart() {
+        const area = this._trendArea;
+        if (!area)
+            return;
+        const points = this._trendPoints;
+        if (!Array.isArray(points) || points.length < 2)
+            return;
+        const [width, height] = area.get_surface_size();
+        const cr = area.get_context();
+        try {
+            const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
+            const padX = 6 * scaleFactor;
+            const padY = 5 * scaleFactor;
+            const plotW = width - 2 * padX;
+            const plotH = height - 2 * padY;
+            if (plotW <= 0 || plotH <= 0)
+                return;
+
+            const lows = points.map(p => p.min);
+            const highs = points.map(p => p.max);
+            const lo = Math.min(...lows);
+            const hi = Math.max(...highs);
+            const span = hi - lo || 1;   // 全平的时候避免除零
+
+            const xAt = i => padX + (plotW * i) / (points.length - 1);
+            const yAt = v => padY + plotH * (1 - (v - lo) / span);
+
+            const polyline = (values, rgba) => {
+                cr.setSourceRGBA(rgba[0], rgba[1], rgba[2], rgba[3]);
+                cr.setLineWidth(Math.max(1.2, 1.6 * scaleFactor));
+                cr.setLineJoin(Cairo.LineJoin.ROUND);
+                cr.moveTo(xAt(0), yAt(values[0]));
+                for (let i = 1; i < values.length; i++)
+                    cr.lineTo(xAt(i), yAt(values[i]));
+                cr.stroke();
+            };
+
+            // 最高温暖色、最低温冷色，深浅主题下都够区分
+            const HIGH = [0.95, 0.55, 0.20, 0.95];
+            const LOW = [0.30, 0.60, 0.95, 0.95];
+            polyline(highs, HIGH);
+            polyline(lows, LOW);
+
+            // 每个数据点的圆点
+            const dot = Math.max(1.5, 1.8 * scaleFactor);
+            for (const [values, rgba] of [[highs, HIGH], [lows, LOW]]) {
+                cr.setSourceRGBA(rgba[0], rgba[1], rgba[2], 1);
+                for (let i = 0; i < values.length; i++) {
+                    cr.arc(xAt(i), yAt(values[i]), dot, 0, 2 * Math.PI);
+                    cr.fill();
+                }
+            }
+        } finally {
+            cr.$dispose();
+        }
+    }
+
     /* now 是 v1 /weather/v1/current 的完整响应体（含 metadata）；
      * aqi 来自空气质量接口，取不到时为 null。 */
     _updateUI(now, forecast, aqi) {
@@ -1325,8 +1742,8 @@ export default class ClimaCNExtension extends Extension {
 
         // 空气质量色环：取不到数据就整块隐藏，不留空环
         this._aqi = aqi ?? null;
-        if (this._aqiArea) {
-            this._aqiArea.visible = this._aqi !== null;
+        if (this._aqiGroup) {
+            this._aqiGroup.visible = this._aqi !== null;
             if (this._aqi)
                 this._aqiArea.queue_repaint();
         }
@@ -1366,7 +1783,8 @@ export default class ClimaCNExtension extends Extension {
         // 和风天气条款要求归因与数据共同显示，此处保留极简来源一行，
         // 完整的说明与链接放在首选项的“数据来源”分组里
         if (this._attributionItem) {
-            this._attributionLabel.text = _('和风天气');
+            // 走兜底时必须标明来源，否则用户会以为数据仍来自和风
+            this._attributionLabel.text = this._usingFallback ? 'Open-Meteo' : _('和风天气');
             this._attributionItem.visible = true;
         }
 
@@ -1378,9 +1796,34 @@ export default class ClimaCNExtension extends Extension {
             this._forecastRowsBox.remove_all_children();
         }
 
+        // ---- 日出日落弧线 ----
+        const sunTimes = parseSunTimes(forecast);
+        this._sunPosition = null;
+        if (sunTimes) {
+            const now = GLib.DateTime.new_now_local();
+            this._sunPosition = sunArcPosition(now.get_hour() * 60 + now.get_minute(), sunTimes);
+            this._sunriseLabel.text = formatClock(sunTimes.sunrise);
+            this._sunsetLabel.text = formatClock(sunTimes.sunset);
+        }
+        if (this._sunArcItem) {
+            this._sunArcItem.visible = sunTimes !== null;
+            if (sunTimes)
+                this._sunArcArea.queue_repaint();
+        }
+
+        // ---- 10 天趋势折线 ----
+        this._trendPoints = parseTrendPoints(forecast);
+        const showTrend = this._trendPoints.length >= 2;
+        if (this._trendArea) {
+            this._trendTitle.visible = showTrend;
+            this._trendArea.visible = showTrend;
+            if (showTrend)
+                this._trendArea.queue_repaint();
+        }
+
         if (forecast && Array.isArray(forecast) && forecast.length > 0) {
             const dayNames = ['今天', '明天', '后天'];
-            const count = Math.min(forecast.length, 3);
+            const count = Math.min(forecast.length, FORECAST_ROWS);
             for (let i = 0; i < count; i++) {
                 const day = forecast[i];
                 const row = new St.BoxLayout({
@@ -1465,8 +1908,18 @@ export default class ClimaCNExtension extends Extension {
         if (this._attributionItem)
             this._attributionItem.visible = false;
         this._aqi = null;
-        if (this._aqiArea)
-            this._aqiArea.visible = false;
+        if (this._aqiGroup)
+            this._aqiGroup.visible = false;
+
+        // 日出日落与趋势同样基于失效的数据，一并隐藏
+        this._sunPosition = null;
+        if (this._sunArcItem)
+            this._sunArcItem.visible = false;
+        this._trendPoints = [];
+        if (this._trendArea) {
+            this._trendTitle.visible = false;
+            this._trendArea.visible = false;
+        }
 
         if (this._forecastRowsBox) {
             this._forecastRowsBox.remove_all_children();

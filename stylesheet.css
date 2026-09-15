@@ -57,9 +57,47 @@
   opacity: 0.7;
 }
 
-/* AQI 色环：环与中心数值都在 Cairo 里画，这里只定尺寸 */
+/* AQI 标识 + 色环：环与中心数值都在 Cairo 里画，这里只定间距与文字样式 */
+.climacn-aqi-group {
+  spacing: 4px;
+}
+
 .climacn-aqi-ring {
-  margin-left: 6px;
+  margin-left: 2px;
+}
+
+.climacn-aqi-label {
+  font-size: 0.75em;
+  opacity: 0.6;
+}
+
+/* ---------------------------------------------------------------------
+ * 自绘图表（日出日落弧线、10 天趋势折线）
+ * 内容全部由 Cairo 绘制，这里只定尺寸与间距
+ * --------------------------------------------------------------------- */
+.climacn-sun-arc {
+  margin: 4px 0px 0px 0px;
+  spacing: 8px;
+}
+
+.climacn-sun-time {
+  font-size: 0.8em;
+  opacity: 0.75;
+  font-feature-settings: 'tnum';
+}
+
+.climacn-sun-arc-canvas {
+  /* 高度由 JS 指定 */
+}
+
+.climacn-trend-title {
+  font-size: 0.8em;
+  opacity: 0.6;
+  margin-top: 8px;
+}
+
+.climacn-trend-chart {
+  margin-top: 2px;
 }
 
 /* ---------------------------------------------------------------------

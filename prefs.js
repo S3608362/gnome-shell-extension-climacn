@@ -1,5 +1,6 @@
 // prefs.js
 import Adw from 'gi://Adw';
+import Gio from 'gi://Gio';
 
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
@@ -38,6 +39,21 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
         });
         apiGroup.add(apiHostRow);
 
+        // --- 备用数据源分组 ---
+        const fallbackGroup = new Adw.PreferencesGroup({
+            title: '备用数据源',
+            description: '和风天气不可用时（未填凭据，或当日请求额度用尽），可自动改用 Open-Meteo 获取数据，避免界面空白。',
+        });
+        page.add(fallbackGroup);
+
+        const fallbackRow = new Adw.SwitchRow({
+            title: '启用 Open-Meteo 兜底',
+            subtitle: 'Open-Meteo 是第三方免费服务，无需注册。开启后扩展会把所选城市的经纬度发送给它。',
+        });
+        settings.bind('use-open-meteo-fallback', fallbackRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        fallbackGroup.add(fallbackRow);
+
         // --- 说明分组 ---
         const infoGroup = new Adw.PreferencesGroup({
             title: '说明',
@@ -50,8 +66,9 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
         // 完整的说明与链接集中放在这里
         const sourceGroup = new Adw.PreferencesGroup({
             title: '数据来源',
-            description: '天气数据由和风天气（QWeather）提供\n' +
+            description: '天气数据默认由和风天气（QWeather）提供\n' +
                 '归因说明：https://developer.qweather.com/attribution.html\n' +
+                '启用备用数据源时，数据改由 Open-Meteo（https://open-meteo.com/）提供\n' +
                 '天气图标来源于和风天气图标库（https://icons.qweather.com/），采用 CC BY 4.0 许可',
         });
         page.add(sourceGroup);
