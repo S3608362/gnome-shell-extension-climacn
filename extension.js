@@ -449,6 +449,8 @@ export default class ClimaCNExtension extends Extension {
 
         this._cityData = null;
         this._isLoadingCities = false;
+        // 图标存在性缓存：图标只有几十个，缓存后可避免每次刷新都去 stat 磁盘
+        this._iconExistsCache = new Map();
         this._requestSeq = 0;
         this._lastFetchAt = 0;      // 上次发起请求的时刻（单调时钟，秒）
         this._onBattery = false;
@@ -682,6 +684,7 @@ export default class ClimaCNExtension extends Extension {
         // 释放状态数据
         this._cityData = null;
         this._isLoadingCities = false;
+        this._iconExistsCache = null;
         this._requestSeq = 0;
         this._apiKey = null;
         this._host = null;
@@ -1547,13 +1550,18 @@ export default class ClimaCNExtension extends Extension {
     }
 
     // 辅助函数：安全地创建 Gio.FileIcon
+    /* query_exists() 是同步 stat，每次刷新都会对同一批图标反复调用。
+     * 图标集合是固定的几十个文件，把结果缓存下来之后，
+     * 扩展在稳定状态下不再产生任何同步 I/O。 */
     _createFileIcon(filePath) {
         try {
-            const file = Gio.File.new_for_path(filePath);
-            if (file.query_exists(null)) {
-                // 修正：使用属性初始化对象
-                return new Gio.FileIcon({ file: file });
+            let exists = this._iconExistsCache?.get(filePath);
+            if (exists === undefined) {
+                exists = Gio.File.new_for_path(filePath).query_exists(null);
+                this._iconExistsCache?.set(filePath, exists);
             }
+            if (exists)
+                return new Gio.FileIcon({ file: Gio.File.new_for_path(filePath) });
         } catch (e) {
             console.error(`[ClimaCN] Failed to create icon from ${filePath}: ${e}`);
         }
