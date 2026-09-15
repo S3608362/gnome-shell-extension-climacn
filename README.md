@@ -6,6 +6,7 @@
 
 **国内 GNOME 用户一直缺少一个精准的天气扩展。**  
 ClimaCN 基于和风天气 API，内置全国城市数据库，支持自定义 API Host，图标完美适配深色顶栏。
+可选 Open-Meteo 作为备用数据源。
 
 ## ✨ 功能特性
 
@@ -20,6 +21,14 @@ ClimaCN 基于和风天气 API，内置全国城市数据库，支持自定义 A
 - 🛟 可选 Open-Meteo 兜底，和风不可用时避免界面空白
 - 🎨 图标自动适配 GNOME 深色顶栏
 - 🔄 每 15 分钟自动刷新，电池供电时延长到 30 分钟
+
+## 📸 界面
+
+<p align="center">
+  <img src="screenshots/menu.png" width="240" alt="菜单主界面">
+  <img src="screenshots/more-data.png" width="240" alt="更多数据">
+  <img src="screenshots/10-day-trend.png" width="240" alt="10 天趋势折线">
+</p>
 
 ## 📦 安装方法
 
@@ -90,6 +99,10 @@ A：保存后约 1 秒会自动重新拉取，不需要重载扩展。
 
 天气数据由[和风天气](https://www.qweather.com/)提供，归因说明见
 <https://developer.qweather.com/attribution.html>。
+
+启用备用数据源后，数据改由 [Open-Meteo](https://open-meteo.com/) 提供。
+该开关默认关闭，开启时扩展会把所选城市的经纬度发送给 Open-Meteo。
+无论使用哪个数据源，菜单底部都会标明实际来源。
 
 ## 📄 开源协议
 
