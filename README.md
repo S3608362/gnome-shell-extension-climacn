@@ -12,30 +12,36 @@ ClimaCN 基于和风天气 API，内置全国城市数据库，支持自定义 A
 - 🏙️ 内置全国城市数据库，支持汉字搜索
 - 🌡️ 实时温度、体感温度、湿度、风向风力
 - 📊 气压、能见度、露点、云量、紫外线指数、阵风、降水量
-- 📅 未来三天逐日预报（最高/最低温度、天气状况）
+- 🟢 空气质量色环（AQI），按等级变色
+- 🌅 日出日落弧线，标出太阳当前位置
+- 📈 未来 10 天趋势折线（可折叠），逐点标注温度
+- 📅 每日预报（最高/最低温度、天气状况）
 - ⚙️ 支持自定义 API Key 和 API Host
+- 🛟 可选 Open-Meteo 兜底，和风不可用时避免界面空白
 - 🎨 图标自动适配 GNOME 深色顶栏
-- 🔄 每 15 分钟自动刷新
+- 🔄 每 15 分钟自动刷新，电池供电时延长到 30 分钟
 
 ## 📦 安装方法
 
 ### 安装
+
+从 [extensions.gnome.org](https://extensions.gnome.org/) 搜索 ClimaCN 一键安装，或按下面的步骤手动安装。
 
 1. 下载 [最新版本](https://github.com/S3608362/gnome-shell-extension-climacn/releases/latest) 的 `.shell-extension.zip`
 
 2. 解压到扩展目录：
 
    ```bash
-   mkdir -p ~/.local/share/gnome-shell/extensions/climacn@outlook.com
-   unzip -o climacn@outlook.com.shell-extension.zip \
-     -d ~/.local/share/gnome-shell/extensions/climacn@outlook.com
+   mkdir -p ~/.local/share/gnome-shell/extensions/climacn-weather@outlook.com
+   unzip -o climacn-weather@outlook.com.shell-extension.zip \
+     -d ~/.local/share/gnome-shell/extensions/climacn-weather@outlook.com
    ```
 
 3. 编译 Schema：
 
    ```bash
    glib-compile-schemas \
-     ~/.local/share/gnome-shell/extensions/climacn@outlook.com/schemas/
+     ~/.local/share/gnome-shell/extensions/climacn-weather@outlook.com/schemas/
    ```
 
 4. 重启 GNOME Shell：

@@ -2,6 +2,18 @@
 
 ## v1.5 (2026-09-15)
 
+### ⚠️ 安装目录变了
+
+- 扩展标识（UUID）由 `climacn@outlook.com` 改为 **`climacn-weather@outlook.com`**，
+  安装目录和打包文件名随之改变。**手动安装过的用户请先删除旧目录**，否则两个版本
+  会被同时加载：
+
+  ```bash
+  rm -rf ~/.local/share/gnome-shell/extensions/climacn@outlook.com
+  ```
+
+- 配置文件按标识存放，因此 **API Key、API Host 与已选城市需要重填一次**。
+
 ### 新增
 
 - 空气质量色环：卡片头右侧显示 AQI 数值，环的颜色与长度按 AQI 等级变化。
