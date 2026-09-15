@@ -36,6 +36,25 @@ const TREND_LABEL_PX = 8;                 // 折线数值标注的字号（逻�
 const OPEN_METEO_HOST = 'https://api.open-meteo.com';
 
 /* =====================================================================
+ * 诊断日志
+ * 扩展运行在 GNOME Shell 进程里，往系统日志刷屏会拖慢整个桌面会话，
+ * 因此默认不输出任何日志。排查问题（凭据错误、接口返回异常等）时，
+ * 在首选项里打开「输出调试日志」，再用
+ *     journalctl -f -o cat /usr/bin/gnome-shell
+ * 查看。失败信息同时也会显示在菜单里，日常使用不需要看日志。
+ * ===================================================================== */
+let _debug = false;
+
+function setDebugLogging(enabled) {
+    _debug = !!enabled;
+}
+
+function logError(...args) {
+    if (_debug)
+        console.error('[ClimaCN]', ...args);
+}
+
+/* =====================================================================
  * 和风天气 v1 接口
  * 定位由城市 ID 改为经纬度，认证仍走 API Key 请求头。
  * 旧的公共地址（devapi.qweather.com 等）自 2026 年起逐步停止服务。
@@ -444,6 +463,13 @@ export default class ClimaCNExtension extends Extension {
         this._configDebounceId = 0;
         this._searchActivateId = 0;
         this._searchTextChangedId = 0;
+        this._debugLoggingId = 0;
+        // 自绘图表的 repaint、刷新按钮的 activate 信号 ID，
+        // 同样要在 disable() 里断开
+        this._sunArcRepaintId = 0;
+        this._aqiRepaintId = 0;
+        this._trendRepaintId = 0;
+        this._refreshActivateId = 0;
         this._session = new Soup.Session();
         this._cancellable = new Gio.Cancellable();
 
@@ -521,6 +547,12 @@ export default class ClimaCNExtension extends Extension {
             if (this._cityLabel) this._cityLabel.text = name;
         });
 
+        // 调试日志默认关闭，开启状态跟随设置实时变化，无需重载扩展
+        this._debugLoggingId = this._settings.connect('changed::debug-logging', () => {
+            setDebugLogging(this._settings.get_boolean('debug-logging'));
+        });
+        setDebugLogging(this._settings.get_boolean('debug-logging'));
+
         this._stylesheetPath = this.path + '/stylesheet.css';
         this._theme = St.ThemeContext.get_for_stage(global.stage).get_theme();
         this._theme.load_stylesheet(Gio.File.new_for_path(this._stylesheetPath));
@@ -584,19 +616,6 @@ export default class ClimaCNExtension extends Extension {
             this._configDebounceId = 0;
         }
 
-        // 信号必须在 actor 销毁前断开：destroy() 之后 clutter_text 已不可访问
-        if (this._searchEntry) {
-            const clutterText = this._searchEntry.clutter_text;
-            if (this._searchActivateId) {
-                clutterText.disconnect(this._searchActivateId);
-                this._searchActivateId = 0;
-            }
-            if (this._searchTextChangedId) {
-                clutterText.disconnect(this._searchTextChangedId);
-                this._searchTextChangedId = 0;
-            }
-        }
-
         if (this._cancellable && !this._cancellable.is_cancelled())
             this._cancellable.cancel();
         if (this._session) {
@@ -605,12 +624,21 @@ export default class ClimaCNExtension extends Extension {
         }
         if (this._stylesheetPath && this._theme) {
             const file = Gio.File.new_for_path(this._stylesheetPath);
-            try { this._theme.unload_stylesheet(file); } catch (e) { console.error(`[ClimaCN] ${e}`); }
+            try { this._theme.unload_stylesheet(file); } catch (e) { logError(e); }
         }
+
+        this._destroyUI();
+
         if (this._indicator) {
             this._indicator.destroy();
             this._indicator = null;
         }
+        if (this._settings && this._debugLoggingId) {
+            this._settings.disconnect(this._debugLoggingId);
+            this._debugLoggingId = 0;
+        }
+        // 设置对象即将释放，日志开关一并复位
+        setDebugLogging(false);
         if (this._settings) {
             if (this._apiKeyChangedId) {
                 this._settings.disconnect(this._apiKeyChangedId);
@@ -643,44 +671,6 @@ export default class ClimaCNExtension extends Extension {
             this._upower = null;
         }
 
-        // 释放全部 UI 引用，避免反复 enable/disable 后残留 actor 导致内存泄漏
-        this._weatherIcon = null;
-        this._tempLabel = null;
-        this._headerIcon = null;
-        this._headerTemp = null;
-        this._headerCondition = null;
-        this._aqiGroup = null;
-        this._aqiArea = null;
-        this._sunriseLabel = null;
-        this._sunArcArea = null;
-        this._sunsetLabel = null;
-        this._sunArcItem = null;
-        this._cityLabel = null;
-        this._feelsLikeLabel = null;
-        this._humidityLabel = null;
-        this._windLabel = null;
-        this._updateTimeLabel = null;
-        this._pressureLabel = null;
-        this._visibilityLabel = null;
-        this._dewPointLabel = null;
-        this._cloudCoverLabel = null;
-        this._uvIndexLabel = null;
-        this._windGustLabel = null;
-        this._precipLabel = null;
-        this._attributionLabel = null;
-        this._attributionItem = null;
-        this._noticeLabel = null;
-        this._noticeItem = null;
-        this._refreshItem = null;
-        this._forecastContainer = null;
-        this._forecastTitle = null;
-        this._forecastRowsBox = null;
-        this._trendItem = null;
-        this._trendArea = null;
-        this._searchEntry = null;
-        this._searchStatusLabel = null;
-        this._searchResultsSection = null;
-
         // 释放状态数据
         this._cityData = null;
         this._isLoadingCities = false;
@@ -704,6 +694,117 @@ export default class ClimaCNExtension extends Extension {
         this._stylesheetPath = null;
         this._theme = null;
         this._cancellable = null;
+    }
+
+    /* 释放 enable() 里创建的每一个 UI 对象。
+     * 它们都是 indicator 的子节点，会随 indicator 一起销毁，但逐个显式释放
+     * 更清楚，也让创建点与销毁点一一对应，便于检查是否漏掉了哪个。
+     *
+     * 顺序：先断信号再销毁对象 —— destroy() 之后对象的方法不再可用；
+     * 而逐个 destroy() 时子节点会先脱离父节点，因此随后再销毁父容器
+     * 不会重复销毁，重复调用 destroy() 本身也是安全的空操作。 */
+    _destroyUI() {
+        // 1. 断开 UI 对象上的信号
+        if (this._searchEntry) {
+            const clutterText = this._searchEntry.clutter_text;
+            if (this._searchActivateId) {
+                clutterText.disconnect(this._searchActivateId);
+                this._searchActivateId = 0;
+            }
+            if (this._searchTextChangedId) {
+                clutterText.disconnect(this._searchTextChangedId);
+                this._searchTextChangedId = 0;
+            }
+        }
+        if (this._sunArcRepaintId) {
+            this._sunArcArea?.disconnect(this._sunArcRepaintId);
+            this._sunArcRepaintId = 0;
+        }
+        if (this._aqiRepaintId) {
+            this._aqiArea?.disconnect(this._aqiRepaintId);
+            this._aqiRepaintId = 0;
+        }
+        if (this._trendRepaintId) {
+            this._trendArea?.disconnect(this._trendRepaintId);
+            this._trendRepaintId = 0;
+        }
+        if (this._refreshActivateId) {
+            this._refreshItem?.disconnect(this._refreshActivateId);
+            this._refreshActivateId = 0;
+        }
+
+        // 2. 销毁对象并清空引用
+        this._sunriseLabel?.destroy();
+        this._sunriseLabel = null;
+        this._sunArcArea?.destroy();
+        this._sunArcArea = null;
+        this._sunsetLabel?.destroy();
+        this._sunsetLabel = null;
+        this._sunArcItem?.destroy();
+        this._sunArcItem = null;
+
+        this._aqiArea?.destroy();
+        this._aqiArea = null;
+        this._aqiGroup?.destroy();
+        this._aqiGroup = null;
+
+        this._headerIcon?.destroy();
+        this._headerIcon = null;
+        this._headerTemp?.destroy();
+        this._headerTemp = null;
+        this._headerCondition?.destroy();
+        this._headerCondition = null;
+        this._cityLabel?.destroy();
+        this._cityLabel = null;
+
+        this._noticeLabel?.destroy();
+        this._noticeLabel = null;
+        this._noticeItem?.destroy();
+        this._noticeItem = null;
+        this._attributionLabel?.destroy();
+        this._attributionLabel = null;
+        this._attributionItem?.destroy();
+        this._attributionItem = null;
+        this._refreshItem?.destroy();
+        this._refreshItem = null;
+
+        this._forecastTitle?.destroy();
+        this._forecastTitle = null;
+        this._forecastRowsBox?.destroy();
+        this._forecastRowsBox = null;
+        this._forecastContainer?.destroy();
+        this._forecastContainer = null;
+        this._trendArea?.destroy();
+        this._trendArea = null;
+        this._trendItem?.destroy();
+        this._trendItem = null;
+
+        this._searchEntry?.destroy();
+        this._searchEntry = null;
+        this._searchStatusLabel?.destroy();
+        this._searchStatusLabel = null;
+        this._searchResultsSection?.destroy();
+        this._searchResultsSection = null;
+
+        // 面板指示器上的图标与温度
+        this._weatherIcon?.destroy();
+        this._weatherIcon = null;
+        this._tempLabel?.destroy();
+        this._tempLabel = null;
+
+        /* 详情区的值标签由 _createGridCell / _createExtraRow 创建，
+         * 父容器随 indicator 一并销毁，这里只需清空引用 */
+        this._feelsLikeLabel = null;
+        this._humidityLabel = null;
+        this._windLabel = null;
+        this._updateTimeLabel = null;
+        this._pressureLabel = null;
+        this._visibilityLabel = null;
+        this._dewPointLabel = null;
+        this._cloudCoverLabel = null;
+        this._uvIndexLabel = null;
+        this._windGustLabel = null;
+        this._precipLabel = null;
     }
 
     _createIndicator() {
@@ -767,7 +868,7 @@ export default class ClimaCNExtension extends Extension {
             height: SUN_ARC_HEIGHT,
             y_align: Clutter.ActorAlign.CENTER
         });
-        this._sunArcArea.connect('repaint', () => this._drawSunArc());
+        this._sunArcRepaintId = this._sunArcArea.connect('repaint', () => this._drawSunArc());
         box.add_child(this._sunArcArea);
 
         this._sunsetLabel = new St.Label({
@@ -836,7 +937,7 @@ export default class ClimaCNExtension extends Extension {
             height: AQI_RING_SIZE,
             y_align: Clutter.ActorAlign.CENTER
         });
-        this._aqiArea.connect('repaint', () => this._drawAqiRing());
+        this._aqiRepaintId = this._aqiArea.connect('repaint', () => this._drawAqiRing());
         this._aqiGroup.add_child(this._aqiArea);
         row.add_child(this._aqiGroup);
 
@@ -977,7 +1078,7 @@ export default class ClimaCNExtension extends Extension {
             width: TREND_CHART_WIDTH,
             height: TREND_CHART_HEIGHT
         });
-        this._trendArea.connect('repaint', () => this._drawTrendChart());
+        this._trendRepaintId = this._trendArea.connect('repaint', () => this._drawTrendChart());
 
         const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
         item.add_child(this._trendArea);
@@ -1008,7 +1109,7 @@ export default class ClimaCNExtension extends Extension {
 
         // PopupImageMenuItem 把图标放在文字左侧，比手动 add_child 更规整
         this._refreshItem = new PopupMenu.PopupImageMenuItem(_('刷新'), 'view-refresh-symbolic');
-        this._refreshItem.connect('activate', () => this._onManualRefresh());
+        this._refreshActivateId = this._refreshItem.connect('activate', () => this._onManualRefresh());
         this._indicator.menu.addMenuItem(this._refreshItem);
     }
 
@@ -1063,7 +1164,7 @@ export default class ClimaCNExtension extends Extension {
                 this._parseCSV(new TextDecoder().decode(contents));
                 this._isLoadingCities = false;
             } catch (e) {
-                console.error(`[ClimaCN] Failed to load city data: ${e}`);
+                logError(`Failed to load city data: ${e}`);
                 this._cityData = [];
                 this._isLoadingCities = false;
                 this._showSearchStatus(_('本地城市库加载失败，请检查文件路径'));
@@ -1095,7 +1196,7 @@ export default class ClimaCNExtension extends Extension {
                 };
                 // adm2 仅用于显示，缺失不算致命；经纬度是 v1 接口的定位依据，必须有
                 if (col.name < 0 || col.adm1 < 0 || col.lat < 0 || col.lon < 0) {
-                    console.error('[ClimaCN] 城市库表头缺少必要列，已放弃解析');
+                    logError('城市库表头缺少必要列，已放弃解析');
                     break;
                 }
                 continue;
@@ -1310,7 +1411,7 @@ export default class ClimaCNExtension extends Extension {
         } catch (_e) {
             // 响应体读不出来不影响错误提示
         }
-        console.error(`[ClimaCN] HTTP ${status}: ${body}`);
+        logError(`HTTP ${status}: ${body}`);
 
         if (status === Soup.Status.UNAUTHORIZED || status === Soup.Status.FORBIDDEN) {
             if (this._timeoutId) {
@@ -1356,7 +1457,7 @@ export default class ClimaCNExtension extends Extension {
                     if (seq !== this._requestSeq) return;
 
                     if (message.status_code !== Soup.Status.OK) {
-                        console.error(`[ClimaCN] Open-Meteo HTTP ${message.status_code}`);
+                        logError(`Open-Meteo HTTP ${message.status_code}`);
                         this._showError(_('备用数据源请求失败'));
                         return;
                     }
@@ -1371,7 +1472,7 @@ export default class ClimaCNExtension extends Extension {
                     this._updateUI(current, daily, null);   // 兜底不提供 AQI
                 } catch (e) {
                     if (!this._enabled) return;
-                    console.error(`[ClimaCN] Open-Meteo parse error: ${e}`);
+                    logError(`Open-Meteo parse error: ${e}`);
                     this._showError();
                 }
             }
@@ -1430,7 +1531,7 @@ export default class ClimaCNExtension extends Extension {
 
                     const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
                     if (!json.condition || !json.temperature) {
-                        console.error(`[ClimaCN] 响应缺少预期字段: ${JSON.stringify(json).slice(0, 300)}`);
+                        logError(`响应缺少预期字段: ${JSON.stringify(json).slice(0, 300)}`);
                         this._showError();
                         return;
                     }
@@ -1453,7 +1554,7 @@ export default class ClimaCNExtension extends Extension {
                     });
                 } catch (e) {
                     if (!this._enabled) return;
-                    console.error(`[ClimaCN] Network/parse error: ${e}`);
+                    logError(`Network/parse error: ${e}`);
                     this._showError();
                 }
             }
@@ -1486,7 +1587,7 @@ export default class ClimaCNExtension extends Extension {
                         return;
                     }
                     if (message.status_code !== Soup.Status.OK) {
-                        console.error(`[ClimaCN] 预报请求 HTTP ${message.status_code}`);
+                        logError(`预报请求 HTTP ${message.status_code}`);
                         callback(null);
                         return;
                     }
@@ -1495,7 +1596,7 @@ export default class ClimaCNExtension extends Extension {
                     callback(Array.isArray(json.days) ? json.days : null);
                 } catch (e) {
                     if (!this._enabled) return;
-                    console.error(`[ClimaCN] Forecast parse error: ${e}`);
+                    logError(`Forecast parse error: ${e}`);
                     callback(null);
                 }
             }
@@ -1533,7 +1634,7 @@ export default class ClimaCNExtension extends Extension {
                     }
                     if (message.status_code !== Soup.Status.OK) {
                         this._aqiFailCount++;
-                        console.error(`[ClimaCN] 空气质量请求 HTTP ${message.status_code}`);
+                        logError(`空气质量请求 HTTP ${message.status_code}`);
                         callback(null);
                         return;
                     }
@@ -1542,7 +1643,7 @@ export default class ClimaCNExtension extends Extension {
                     callback(parseAqiIndex(json));
                 } catch (e) {
                     if (!this._enabled) return;
-                    console.error(`[ClimaCN] Air quality parse error: ${e}`);
+                    logError(`Air quality parse error: ${e}`);
                     callback(null);
                 }
             }
@@ -1563,7 +1664,7 @@ export default class ClimaCNExtension extends Extension {
             if (exists)
                 return new Gio.FileIcon({ file: Gio.File.new_for_path(filePath) });
         } catch (e) {
-            console.error(`[ClimaCN] Failed to create icon from ${filePath}: ${e}`);
+            logError(`Failed to create icon from ${filePath}: ${e}`);
         }
         return null;
     }

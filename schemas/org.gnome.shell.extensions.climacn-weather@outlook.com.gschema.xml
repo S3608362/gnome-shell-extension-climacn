@@ -61,6 +61,16 @@
         城市的经纬度发送给它；默认关闭。</description>
     </key>
 
+    <!-- 调试日志开关 -->
+    <key name="debug-logging" type="b">
+      <default>false</default>
+      <summary>输出调试日志</summary>
+      <description>开启后，扩展会把请求失败、响应解析异常等信息写入系统日志
+        （journalctl -f -o cat /usr/bin/gnome-shell）。默认关闭：扩展运行在
+        GNOME Shell 进程内，持续输出日志会影响整个桌面会话的性能。
+        日常使用不需要开启，出错时菜单里也会给出提示。</description>
+    </key>
+
     <!-- 气压历史（供趋势判断，JSON 数组，跨重启保留） -->
     <key name="pressure-history" type="s">
       <default>''</default>
