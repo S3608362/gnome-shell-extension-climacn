@@ -52,5 +52,13 @@
       <description>记录 daily-request-count 是哪一天的计数，日期变化时归零。</description>
     </key>
 
+    <!-- 气压历史（供趋势判断，JSON 数组，跨重启保留） -->
+    <key name="pressure-history" type="s">
+      <default>''</default>
+      <summary>近期气压采样</summary>
+      <description>形如 [{"t":&lt;unix秒&gt;,"p":&lt;hPa&gt;}] 的 JSON 数组，仅保留最近数小时，
+        用于计算三小时气压变化趋势。重启 GNOME Shell 后趋势依然可用。</description>
+    </key>
+
   </schema>
 </schemalist>

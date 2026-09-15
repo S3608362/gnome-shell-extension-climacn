@@ -5,6 +5,9 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Soup from 'gi://Soup?version=3.0';
 import Clutter from 'gi://Clutter';
+import Cairo from 'gi://cairo';
+import Pango from 'gi://Pango';
+import PangoCairo from 'gi://PangoCairo';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
@@ -12,15 +15,18 @@ import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/
 
 /* =====================================================================
  * 刷新与配额策略
- * 和风天气免费额度为每日 1000 次、每月 50000 次。每次刷新消耗 2 次请求
- * （实时 + 预报），15 分钟间隔下约 192 次/天，余量充足。以下策略用于
- * 防止连点、缩短间隔或长时间挂机把额度吃掉。
+ * 和风天气免费额度为每日 1000 次、每月 50000 次。每次刷新消耗 3 次请求
+ * （实时 + 预报 + 空气质量），15 分钟间隔下约 288 次/天，余量充足。
+ * 以下策略用于防止连点、缩短间隔或长时间挂机把额度吃掉。
  * ===================================================================== */
 const UPDATE_INTERVAL_SEC = 15 * 60;      // 插电时的自动刷新间隔
 const BATTERY_INTERVAL_SEC = 30 * 60;     // 电池供电时拉长，减少唤醒与请求
 const CACHE_TTL_SEC = 5 * 60;             // 数据新鲜期，期内自动刷新不再请求
 const MANUAL_COOLDOWN_SEC = 60;           // 手动刷新最小间隔，防止连点
 const DAILY_REQUEST_BUDGET = 800;         // 每日请求上限（限额 1000，留出余量）
+const AQI_RING_SIZE = 34;                 // AQI 色环的逻辑像素尺寸（绘制时按缩放比放大）
+const AQI_FONT_PX = 10;                   // 色环中心数值的字号（逻辑像素）
+const AQI_MAX_FAILURES = 2;               // 连续失败几次后不再请求空气质量
 
 /* =====================================================================
  * 和风天气 v1 接口
@@ -105,6 +111,113 @@ function nextRequestCount(storedDate, storedCount, today) {
 }
 
 /* =====================================================================
+ * 空气质量
+ * ===================================================================== */
+function getAirQualityUrl(host, lat, lon) {
+    return `${host}/airquality/v1/current/${formatCoord(lat)}/${formatCoord(lon)}`;
+}
+
+/* 响应里的 indexes 可能同时含当地标准与和风通用 AQI，
+ * 优先取和风通用（code 为 qaqi），取不到再退回第一项。 */
+function parseAqiIndex(json) {
+    const list = Array.isArray(json?.indexes) ? json.indexes : [];
+    if (list.length === 0)
+        return null;
+    const idx = list.find(i => i?.code === 'qaqi') ?? list[0];
+    const aqi = Number(idx?.aqi);
+    if (!Number.isFinite(aqi))
+        return null;
+    const c = idx?.color ?? {};
+    const channel = v => (Number.isFinite(Number(v)) ? Number(v) : 128);
+    return {
+        aqi,
+        display: idx?.aqiDisplay || String(Math.round(aqi)),
+        category: idx?.category || '',
+        color: { r: channel(c.red), g: channel(c.green), b: channel(c.blue) },
+    };
+}
+
+/* 色环填充比例。国标 300 以上即严重污染，以 300 为满量程。 */
+function aqiFillRatio(aqi) {
+    const n = Number(aqi);
+    if (!Number.isFinite(n))
+        return 0;
+    return Math.min(Math.max(n, 0), 300) / 300;
+}
+
+/* =====================================================================
+ * 气压历史与趋势
+ * 和风只给当前气压，趋势要靠本地按时间采样后自行比较，
+ * 采样写入 GSettings，重启 Shell 后依然可用。
+ * ===================================================================== */
+const PRESSURE_WINDOW_SEC = 3 * 3600;   // 比较窗口：3 小时
+const PRESSURE_MAX_SAMPLES = 24;
+const PRESSURE_STEADY_HPA = 1.0;        // 变化小于 1 hPa 视为平稳
+const PRESSURE_MIN_SPAN_SEC = 30 * 60;  // 历史不足半小时不给趋势，避免误导
+
+function parsePressureHistory(raw) {
+    try {
+        const arr = JSON.parse(raw || '[]');
+        if (!Array.isArray(arr))
+            return [];
+        return arr
+            .filter(e => Number.isFinite(Number(e?.t)) && Number.isFinite(Number(e?.p)))
+            .map(e => ({ t: Number(e.t), p: Number(e.p) }))
+            .sort((a, b) => a.t - b.t);
+    } catch (_e) {
+        return [];   // 数据损坏时按空历史处理，不影响主流程
+    }
+}
+
+function appendPressureSample(history, t, p) {
+    const cutoff = t - PRESSURE_WINDOW_SEC;
+    const kept = history.filter(e => e.t >= cutoff);
+    kept.push({ t, p });
+    return kept.slice(-PRESSURE_MAX_SAMPLES);
+}
+
+function pressureTrend(history, currentP, nowSec) {
+    if (!Number.isFinite(currentP) || history.length === 0)
+        return null;
+    const cutoff = nowSec - PRESSURE_WINDOW_SEC;
+    const base = history.find(e => e.t >= cutoff);
+    if (!base || nowSec - base.t < PRESSURE_MIN_SPAN_SEC)
+        return null;
+    const delta = currentP - base.p;
+    const dir = Math.abs(delta) < PRESSURE_STEADY_HPA
+        ? 'steady'
+        : (delta > 0 ? 'rising' : 'falling');
+    return { delta, dir };
+}
+
+/* 趋势的紧凑表示，例如 "↑2.1" */
+function formatPressureTrend(trend) {
+    if (!trend)
+        return '';
+    if (trend.dir === 'steady')
+        return '→';
+    return `${trend.dir === 'rising' ? '↑' : '↓'}${Math.abs(trend.delta).toFixed(1)}`;
+}
+
+/* 色环中心数值所用的字体描述。两个坑都在这里：
+ * 1. 必须带字体族——只用 FontDescription.new() 得到的描述没有族；
+ * 2. set_absolute_size 的单位是 Pango 单位，须乘 PANGO_SCALE。
+ *    传裸像素值会得到 0.02pt 的字号，实测测量宽度为 0，文字完全不可见。
+ * 优先继承主题字体，取不到时退回 fontconfig 的通用族名。 */
+function aqiFontDescription(themeFont, scaleFactor) {
+    let font = null;
+    try {
+        font = themeFont?.copy() ?? null;
+    } catch (_e) {
+        font = null;
+    }
+    if (!font || !font.get_family())
+        font = Pango.FontDescription.from_string('Sans');
+    font.set_absolute_size(Math.round(AQI_FONT_PX * scaleFactor) * Pango.SCALE);
+    return font;
+}
+
+/* =====================================================================
  * CSV 行解析
  * 城市库中部分字段被引号包裹且内含逗号（如 "Taiwan, Province of China"），
  * 直接用 split(',') 会导致后续字段整体错位，故按 CSV 规则逐字符解析。
@@ -169,6 +282,10 @@ export default class ClimaCNExtension extends Extension {
         this._latitude = this._settings.get_double('latitude');
         this._longitude = this._settings.get_double('longitude');
         this._currentCityName = this._settings.get_string('city-name');
+
+        this._pressureHistory = parsePressureHistory(this._settings.get_string('pressure-history'));
+        this._aqi = null;
+        this._aqiFailCount = 0;
 
         // _selectCity() 会连续写三个键，期间置位以免监听器重复发起请求
         this._writingSettings = false;
@@ -346,6 +463,7 @@ export default class ClimaCNExtension extends Extension {
         this._headerIcon = null;
         this._headerTemp = null;
         this._headerCondition = null;
+        this._aqiArea = null;
         this._cityLabel = null;
         this._feelsLikeLabel = null;
         this._humidityLabel = null;
@@ -380,6 +498,9 @@ export default class ClimaCNExtension extends Extension {
         this._longitude = 0;
         this._currentCityName = null;
         this._writingSettings = false;
+        this._aqi = null;
+        this._aqiFailCount = 0;
+        this._pressureHistory = [];
         this._lastFetchAt = 0;
         this._onBattery = false;
         this._upowerSignalId = 0;
@@ -458,6 +579,18 @@ export default class ClimaCNExtension extends Extension {
             y_align: Clutter.ActorAlign.CENTER
         });
         row.add_child(this._headerCondition);
+
+        // 弹性留白把 AQI 色环推到行尾；没有空气质量数据时整体隐藏
+        row.add_child(new St.Widget({ x_expand: true }));
+        this._aqiArea = new St.DrawingArea({
+            style_class: 'climacn-aqi-ring',
+            width: AQI_RING_SIZE,
+            height: AQI_RING_SIZE,
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        this._aqiArea.connect('repaint', () => this._drawAqiRing());
+        this._aqiArea.visible = false;
+        row.add_child(this._aqiArea);
 
         box.add_child(row);
 
@@ -969,10 +1102,21 @@ export default class ClimaCNExtension extends Extension {
                         this._showError();
                         return;
                     }
-                    this._fetchForecast(seq, (forecast) => {
-                        // 预报返回时 disable() 可能已执行
+                    // 预报与空气质量并行拉取，两个都回来再更新界面。
+                    // 串行的话，空气质量接口慢或不可用会把整个界面拖住。
+                    const pending = {};
+                    const settle = () => {
+                        if (!('forecast' in pending) || !('aqi' in pending)) return;
                         if (!this._enabled || seq !== this._requestSeq) return;
-                        this._updateUI(json, forecast);
+                        this._updateUI(json, pending.forecast, pending.aqi);
+                    };
+                    this._fetchForecast(seq, (forecast) => {
+                        pending.forecast = forecast;
+                        settle();
+                    });
+                    this._fetchAirQuality(seq, (aqi) => {
+                        pending.aqi = aqi;
+                        settle();
                     });
                 } catch (e) {
                     if (!this._enabled) return;
@@ -1025,6 +1169,53 @@ export default class ClimaCNExtension extends Extension {
         );
     }
 
+    /* 空气质量是第三个请求。若该接口不可用（凭据未授权、套餐不含等），
+     * 连续失败 AQI_MAX_FAILURES 次后就不再请求，免得白白消耗额度。
+     * 任何失败路径都会回调 null，保证调用方的并行汇合不会卡住。 */
+    _fetchAirQuality(seq, callback) {
+        if (this._aqiFailCount >= AQI_MAX_FAILURES) {
+            callback(null);
+            return;
+        }
+        const url = getAirQualityUrl(this._host, this._latitude, this._longitude);
+        const message = Soup.Message.new('GET', url);
+        if (!message) {
+            callback(null);
+            return;
+        }
+        message.request_headers.append('X-Qw-Api-Key', this._apiKey);
+        this._countRequest();
+
+        this._session.send_and_read_async(
+            message,
+            Soup.MessagePriority.NORMAL,
+            this._cancellable,
+            (session, result) => {
+                try {
+                    const bytes = session.send_and_read_finish(result);
+                    if (!this._enabled || seq !== this._requestSeq) return;
+                    if (this._cancellable?.is_cancelled()) {
+                        callback(null);
+                        return;
+                    }
+                    if (message.status_code !== Soup.Status.OK) {
+                        this._aqiFailCount++;
+                        console.error(`[ClimaCN] 空气质量请求 HTTP ${message.status_code}`);
+                        callback(null);
+                        return;
+                    }
+                    const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
+                    this._aqiFailCount = 0;
+                    callback(parseAqiIndex(json));
+                } catch (e) {
+                    if (!this._enabled) return;
+                    console.error(`[ClimaCN] Air quality parse error: ${e}`);
+                    callback(null);
+                }
+            }
+        );
+    }
+
     // 辅助函数：安全地创建 Gio.FileIcon
     _createFileIcon(filePath) {
         try {
@@ -1050,8 +1241,75 @@ export default class ClimaCNExtension extends Extension {
         }
     }
 
-    /* now 是 v1 /weather/v1/current 的完整响应体（含 metadata） */
-    _updateUI(now, forecast) {
+    /* AQI 色环：灰色底环 + 按 AQI 比例填充的彩环，中心写数值。
+     * 尺寸取自 surface（已含 HiDPI 缩放），线宽与字号按 scaleFactor 放大。 */
+    _drawAqiRing() {
+        const area = this._aqiArea;
+        if (!area)
+            return;
+        const [width, height] = area.get_surface_size();
+        const cr = area.get_context();
+        try {
+            const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
+            const cx = width / 2;
+            const cy = height / 2;
+            const lineWidth = Math.max(2, 3.5 * scaleFactor);
+            const radius = Math.min(width, height) / 2 - lineWidth / 2 - scaleFactor;
+            if (radius <= 0)
+                return;
+
+            const start = -Math.PI / 2;    // 从正上方起笔
+            const sweep = Math.PI * 1.5;   // 270° 的量表弧
+
+            cr.setLineWidth(lineWidth);
+            cr.setLineCap(Cairo.LineCap.ROUND);
+
+            // 底环
+            cr.setSourceRGBA(0.5, 0.5, 0.5, 0.25);
+            cr.arc(cx, cy, radius, start, start + sweep);
+            cr.stroke();
+
+            const aqi = this._aqi;
+            if (!aqi)
+                return;
+
+            // 数据环，颜色由接口给出
+            const ratio = aqiFillRatio(aqi.aqi);
+            if (ratio > 0) {
+                cr.setSourceRGBA(aqi.color.r / 255, aqi.color.g / 255, aqi.color.b / 255, 1);
+                cr.arc(cx, cy, radius, start, start + sweep * ratio);
+                cr.stroke();
+            }
+
+            // 中心数值用主题前景色，深浅主题下都能看清
+            const [hasColor, color] = area.get_theme_node().lookup_color('color', false);
+            if (hasColor)
+                cr.setSourceRGBA(color.red / 255, color.green / 255, color.blue / 255, 1);
+            else
+                cr.setSourceRGBA(0.5, 0.5, 0.5, 1);
+
+            // 主题字体取不到时不能让绘制失败，交给 aqiFontDescription 兜底
+            let themeFont = null;
+            try {
+                themeFont = area.get_theme_node().get_font();
+            } catch (_e) {
+                themeFont = null;
+            }
+            const layout = PangoCairo.create_layout(cr);
+            layout.set_font_description(aqiFontDescription(themeFont, scaleFactor));
+            layout.set_text(aqi.display, -1);
+            const [textW, textH] = layout.get_pixel_size();
+            cr.moveTo(Math.round(cx - textW / 2), Math.round(cy - textH / 2));
+            PangoCairo.show_layout(cr, layout);
+        } finally {
+            // repaint 每次都给一个新的 context，不释放会持续泄漏
+            cr.$dispose();
+        }
+    }
+
+    /* now 是 v1 /weather/v1/current 的完整响应体（含 metadata）；
+     * aqi 来自空气质量接口，取不到时为 null。 */
+    _updateUI(now, forecast, aqi) {
         // ---- 当前天气 ----
         const iconCode = safeIconCode(now.condition?.code);
         const icon = this._createFileIcon(`${this.path}/icons/${iconCode}-symbolic.svg`);
@@ -1065,6 +1323,14 @@ export default class ClimaCNExtension extends Extension {
         this._headerTemp.text = tempText;
         this._headerCondition.text = now.condition?.text || '--';
 
+        // 空气质量色环：取不到数据就整块隐藏，不留空环
+        this._aqi = aqi ?? null;
+        if (this._aqiArea) {
+            this._aqiArea.visible = this._aqi !== null;
+            if (this._aqi)
+                this._aqiArea.queue_repaint();
+        }
+
         // ---- 常用数据（两列网格）----
         this._feelsLikeLabel.text = roundTemp(now.feelsLike?.value);
         this._humidityLabel.text = toPercent(now.humidity);
@@ -1074,7 +1340,20 @@ export default class ClimaCNExtension extends Extension {
         this._updateTimeLabel.text = GLib.DateTime.new_now_local().format('%H:%M');
 
         // ---- 折叠区数据 ----
-        this._pressureLabel.text   = formatMeasure(now.pressure);
+        // 气压趋势：接口只给当前值，趋势要靠本地按时间累积采样后自行比较
+        const pressureValue = Number(now.pressure?.value);
+        const nowSec = Math.floor(Date.now() / 1000);
+        let trendText = '';
+        if (Number.isFinite(pressureValue)) {
+            this._pressureHistory = appendPressureSample(this._pressureHistory, nowSec, pressureValue);
+            this._settings.set_string('pressure-history', JSON.stringify(this._pressureHistory));
+            trendText = formatPressureTrend(
+                pressureTrend(this._pressureHistory, pressureValue, nowSec));
+        }
+        this._pressureLabel.text = trendText
+            ? `${formatMeasure(now.pressure)} ${trendText}`
+            : formatMeasure(now.pressure);
+
         this._visibilityLabel.text = formatMeasure(now.visibility);
         this._dewPointLabel.text   = roundTemp(now.dewPoint?.value);
         this._cloudCoverLabel.text = toPercent(now.cloudCover);
@@ -1182,9 +1461,12 @@ export default class ClimaCNExtension extends Extension {
                 label.text = '--';
         }
 
-        // 数据已失效，归因行随之隐藏
+        // 数据已失效，归因行与空气质量色环一并隐藏
         if (this._attributionItem)
             this._attributionItem.visible = false;
+        this._aqi = null;
+        if (this._aqiArea)
+            this._aqiArea.visible = false;
 
         if (this._forecastRowsBox) {
             this._forecastRowsBox.remove_all_children();
