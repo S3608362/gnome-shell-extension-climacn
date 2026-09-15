@@ -52,6 +52,15 @@
       <description>记录 daily-request-count 是哪一天的计数，日期变化时归零。</description>
     </key>
 
+    <!-- Open-Meteo 兜底开关 -->
+    <key name="use-open-meteo-fallback" type="b">
+      <default>false</default>
+      <summary>和风天气不可用时降级到 Open-Meteo</summary>
+      <description>开启后，未配置和风凭据或当日请求额度用尽时，改用 Open-Meteo
+        获取数据，避免界面空白。Open-Meteo 是第三方服务，开启后扩展会把所选
+        城市的经纬度发送给它；默认关闭。</description>
+    </key>
+
     <!-- 气压历史（供趋势判断，JSON 数组，跨重启保留） -->
     <key name="pressure-history" type="s">
       <default>''</default>
