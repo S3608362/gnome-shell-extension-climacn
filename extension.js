@@ -31,6 +31,7 @@ const FORECAST_DAYS = 10;                 // 和风每日预报上限即 10 天�
 const FORECAST_ROWS = 3;                  // 逐日行只展开前 3 天
 const SUN_ARC_HEIGHT = 46;                // 日出日落弧线的高度（逻辑像素）
 const TREND_CHART_HEIGHT = 44;            // 10 天趋势折线的高度（逻辑像素）
+const TREND_CHART_WIDTH = 260;            // 折线宽度：放在子菜单里，需显式指定
 const TREND_LABEL_PX = 9;                 // 折线图标注字号（逻辑像素）
 const OPEN_METEO_HOST = 'https://api.open-meteo.com';
 
@@ -664,7 +665,7 @@ export default class ClimaCNExtension extends Extension {
         this._forecastContainer = null;
         this._forecastTitle = null;
         this._forecastRowsBox = null;
-        this._trendTitle = null;
+        this._trendItem = null;
         this._trendArea = null;
         this._searchEntry = null;
         this._searchStatusLabel = null;
@@ -738,7 +739,8 @@ export default class ClimaCNExtension extends Extension {
     _buildSunArc() {
         const box = new St.BoxLayout({
             style_class: 'climacn-sun-arc',
-            y_align: Clutter.ActorAlign.CENTER
+            y_align: Clutter.ActorAlign.CENTER,
+            x_expand: true   // 关键：否则绘图区宽度为 0，弧线画不出来
         });
 
         this._sunriseLabel = new St.Label({
@@ -775,7 +777,8 @@ export default class ClimaCNExtension extends Extension {
     _buildHeader() {
         const box = new St.BoxLayout({
             style_class: 'climacn-header-box',
-            vertical: true
+            vertical: true,
+            x_expand: true   // 不撑满的话内部 x_expand 的部件拿不到宽度
         });
 
         const row = new St.BoxLayout({
@@ -845,7 +848,8 @@ export default class ClimaCNExtension extends Extension {
     _buildDetails() {
         const grid = new St.BoxLayout({
             style_class: 'climacn-details-grid',
-            vertical: true
+            vertical: true,
+            x_expand: true
         });
 
         const row1 = this._createGridRow(grid);
@@ -927,7 +931,8 @@ export default class ClimaCNExtension extends Extension {
     _buildForecast() {
         this._forecastContainer = new St.BoxLayout({
             style_class: 'climacn-forecast-box',
-            vertical: true
+            vertical: true,
+            x_expand: true
         });
         this._forecastTitle = new St.Label({
             text: _('未来 3 天预报'),
@@ -940,27 +945,33 @@ export default class ClimaCNExtension extends Extension {
         });
         this._forecastContainer.add_child(this._forecastRowsBox);
 
-        // 10 天趋势折线。数据来自同一个每日预报响应（days=10），
-        // 逐日行只展开前 3 天，剩下的用折线看走势。
-        this._trendTitle = new St.Label({
-            text: _('10 天趋势'),
-            style_class: 'climacn-trend-title'
-        });
-        this._trendTitle.visible = false;
-        this._forecastContainer.add_child(this._trendTitle);
-
-        this._trendArea = new St.DrawingArea({
-            style_class: 'climacn-trend-chart',
-            x_expand: true,
-            height: TREND_CHART_HEIGHT
-        });
-        this._trendArea.connect('repaint', () => this._drawTrendChart());
-        this._trendArea.visible = false;
-        this._forecastContainer.add_child(this._trendArea);
+        // 10 天趋势折线放在子菜单里，默认收起——直接铺在菜单里会让
+        // popup 过长，而它属于"想看才展开"的信息
+        this._buildTrendSubmenu();
 
         const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
         item.add_child(this._forecastContainer);
         this._indicator.menu.addMenuItem(item);
+    }
+
+    /* 10 天趋势折线。数据来自同一个每日预报响应（days=10），
+     * 逐日行只展开前 3 天，剩下的走势在这里看。
+     * 子菜单按内容定宽，没有可撑开的余量，因此绘图区要显式给宽度。 */
+    _buildTrendSubmenu() {
+        this._trendItem = new PopupMenu.PopupSubMenuMenuItem(_('10 天趋势'), false);
+        this._trendItem.visible = false;   // 数据不足 2 天时整项隐藏
+
+        this._trendArea = new St.DrawingArea({
+            style_class: 'climacn-trend-chart',
+            width: TREND_CHART_WIDTH,
+            height: TREND_CHART_HEIGHT
+        });
+        this._trendArea.connect('repaint', () => this._drawTrendChart());
+
+        const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        item.add_child(this._trendArea);
+        this._trendItem.menu.addMenuItem(item);
+        this._indicator.menu.addMenuItem(this._trendItem);
     }
 
     _buildFooter() {
@@ -1811,12 +1822,11 @@ export default class ClimaCNExtension extends Extension {
                 this._sunArcArea.queue_repaint();
         }
 
-        // ---- 10 天趋势折线 ----
+        // ---- 10 天趋势折线（收在子菜单里）----
         this._trendPoints = parseTrendPoints(forecast);
         const showTrend = this._trendPoints.length >= 2;
-        if (this._trendArea) {
-            this._trendTitle.visible = showTrend;
-            this._trendArea.visible = showTrend;
+        if (this._trendItem) {
+            this._trendItem.visible = showTrend;
             if (showTrend)
                 this._trendArea.queue_repaint();
         }
@@ -1916,10 +1926,8 @@ export default class ClimaCNExtension extends Extension {
         if (this._sunArcItem)
             this._sunArcItem.visible = false;
         this._trendPoints = [];
-        if (this._trendArea) {
-            this._trendTitle.visible = false;
-            this._trendArea.visible = false;
-        }
+        if (this._trendItem)
+            this._trendItem.visible = false;
 
         if (this._forecastRowsBox) {
             this._forecastRowsBox.remove_all_children();

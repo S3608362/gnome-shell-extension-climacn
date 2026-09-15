@@ -90,14 +90,8 @@
   /* 高度由 JS 指定 */
 }
 
-.climacn-trend-title {
-  font-size: 0.8em;
-  opacity: 0.6;
-  margin-top: 8px;
-}
-
 .climacn-trend-chart {
-  margin-top: 2px;
+  /* 宽高由 JS 指定：折线在子菜单里，没有可撑开的余量 */
 }
 
 /* ---------------------------------------------------------------------
