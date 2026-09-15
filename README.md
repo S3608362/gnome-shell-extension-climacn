@@ -25,8 +25,6 @@ ClimaCN 基于和风天气 API，内置全国城市数据库，支持自定义 A
 
 ### 安装
 
-从 [extensions.gnome.org](https://extensions.gnome.org/) 搜索 ClimaCN 一键安装，或按下面的步骤手动安装。
-
 1. 下载 [最新版本](https://github.com/S3608362/gnome-shell-extension-climacn/releases/latest) 的 `.shell-extension.zip`
 
 2. 解压到扩展目录：
@@ -71,7 +69,13 @@ A：确保图标文件以 `-symbolic.svg` 结尾，GNOME 会自动适配。
 **Q：填了凭据但获取失败？**
 A：依次检查：① API Host 是否填的是自己账号的地址（不是 `devapi.qweather.com`）；
 ② API Key 是否有效；③ 该凭据是否开启了 API 限制但未包含天气接口。
-按 `journalctl -f -o cat /usr/bin/gnome-shell` 可以看到具体的 HTTP 状态码。
+需要看具体的 HTTP 状态码时，在首选项的「排查问题」里打开**输出调试日志**，
+再运行 `journalctl -f -o cat /usr/bin/gnome-shell`。日志默认关闭，
+因为扩展跑在 GNOME Shell 进程里，持续输出会拖慢整个桌面会话。
+
+**Q：菜单里没有空气质量色环？**
+A：色环需要凭据开通了空气质量接口。取不到数据时连续失败两次后整块隐藏，
+不影响其它数据。
 
 **Q：菜单显示「上次更新」是什么时间？**
 A：是最近一次成功获取到数据的时间（手动刷新和自动刷新都会更新它）。

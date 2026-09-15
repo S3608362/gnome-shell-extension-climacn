@@ -54,6 +54,23 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
             Gio.SettingsBindFlags.DEFAULT);
         fallbackGroup.add(fallbackRow);
 
+        // --- 排查问题分组 ---
+        const debugGroup = new Adw.PreferencesGroup({
+            title: '排查问题',
+            description: '获取数据失败时菜单里会给出提示。若要知道更具体的原因，' +
+                '可打开下面的开关，再用 journalctl -f -o cat /usr/bin/gnome-shell 查看输出。',
+        });
+        page.add(debugGroup);
+
+        const debugRow = new Adw.SwitchRow({
+            title: '输出调试日志',
+            subtitle: '默认关闭。扩展运行在 GNOME Shell 进程内，持续输出日志会拖慢整个桌面会话，' +
+                '只在排查问题时临时打开。',
+        });
+        settings.bind('debug-logging', debugRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        debugGroup.add(debugRow);
+
         // --- 说明分组 ---
         const infoGroup = new Adw.PreferencesGroup({
             title: '说明',
