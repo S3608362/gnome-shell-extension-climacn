@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
-  <schema id="org.gnome.shell.extensions.climacn@outlook.com"
-          path="/org/gnome/shell/extensions/climacn@outlook.com/">
+  <schema id="org.gnome.shell.extensions.climacn-weather@outlook.com"
+          path="/org/gnome/shell/extensions/climacn-weather@outlook.com/">
 
     <!-- API Key -->
     <key name="api-key" type="s">
