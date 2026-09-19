@@ -1427,6 +1427,9 @@ export default class ClimaCNExtension extends Extension {
          * 叠在同一位置。所以把说明文字整行搬到输入框外面去，
          * 位置固定，无论输入法处于什么状态都不可能重叠。 */
         this._searchEntry = new St.Entry({
+            /* 必须显式撑开：St.Entry 的宽度是由内容撑出来的，
+             * 没有 hint_text、内容又为空时它会缩成一个小方块。 */
+            x_expand: true,
             track_hover: true,
             can_focus: true,
             style_class: 'climacn-search-entry'
