@@ -33,6 +33,28 @@ const SUN_ARC_HEIGHT = 46;                // 日出日落弧线的高度（逻�
 const TREND_CHART_HEIGHT = 64;            // 折线高度：上下各留一行数字的位置
 const TREND_CHART_WIDTH = 300;            // 折线宽度：放在子菜单里，需显式指定
 const TREND_LABEL_PX = 8;                 // 折线数值标注的字号（逻辑像素）
+const TEMP_BAR_HEIGHT = 8;                // 预报行温度条的高度（逻辑像素）
+/* 宽度必须是固定的：若让它弹性伸缩，各行的天气状况文字长短不同，
+ * 条长就会不一样，"长度代表温差"这个编码立刻失效。 */
+const TEMP_BAR_WIDTH = 64;
+
+/* 冷暖两色，温度条的两端与趋势折线的两条线共用，
+ * 保证同一份数据在两处颜色对得上。取中间明度的橙与蓝：
+ * 浅色和深色主题下都看得清，不像纯红/纯蓝那样在某个主题里糊掉。 */
+const COLOR_HIGH = [0.95, 0.55, 0.20];
+const COLOR_LOW = [0.30, 0.60, 0.95];
+
+/* 温度色阶（冷 → 暖），按气象图惯用的蓝→青→黄→橙。
+ * 不能在蓝与橙之间直接做 RGB 插值：中点约为 (0.63, 0.58, 0.58)，
+ * 是个去饱和的灰紫，"温和"的那几天会糊成一团看不出颜色。
+ * 每项为 [位置, r, g, b]。 */
+const TEMP_RAMP = [
+    [0.00, 0.30, 0.60, 0.95],
+    [0.35, 0.35, 0.80, 0.85],
+    [0.60, 0.95, 0.85, 0.30],
+    [1.00, 0.95, 0.55, 0.20],
+];
+
 const OPEN_METEO_HOST = 'https://api.open-meteo.com';
 
 /* =====================================================================
@@ -815,6 +837,9 @@ export default class ClimaCNExtension extends Extension {
         });
         this._weatherIcon = new St.Icon({
             style_class: 'system-status-icon climacn-panel-icon',
+            /* 首帧的占位图标：不设的话第一次取到数据之前顶栏是空的，
+             * 断网时看上去就像扩展坏了。中性云朵比空白友好。 */
+            icon_name: 'weather-few-clouds-symbolic',
             icon_size: 18,
             y_align: Clutter.ActorAlign.CENTER
         });
@@ -1418,14 +1443,14 @@ export default class ClimaCNExtension extends Extension {
                 GLib.Source.remove(this._timeoutId);
                 this._timeoutId = 0;
             }
-            this._showError(_('API Key 无效或无权访问，已停止更新'));
+            this._showError(_('API Key 无效或无权访问，已停止更新'), 'auth');
             return;
         }
         if (status === Soup.Status.NOT_FOUND) {
-            this._showError(_('API Host 或接口路径不正确'));
+            this._showError(_('API Host 或接口路径不正确'), 'config');
             return;
         }
-        this._showError(`请求失败（HTTP ${status}）`);
+        this._showError(`请求失败（HTTP ${status}）`, 'network');
     }
 
     /* 是否改走 Open-Meteo：需用户在首选项里显式开启，且和风确实不可用
@@ -1458,14 +1483,14 @@ export default class ClimaCNExtension extends Extension {
 
                     if (message.status_code !== Soup.Status.OK) {
                         logError(`Open-Meteo HTTP ${message.status_code}`);
-                        this._showError(_('备用数据源请求失败'));
+                        this._showError(_('备用数据源请求失败'), 'network');
                         return;
                     }
                     const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
                     const current = openMeteoAsQweatherCurrent(json);
                     const daily = openMeteoAsQweatherDaily(json);
                     if (daily.length === 0) {
-                        this._showError(_('备用数据源返回数据不完整'));
+                        this._showError(_('备用数据源返回数据不完整'), 'data');
                         return;
                     }
                     this._usingFallback = true;
@@ -1473,7 +1498,7 @@ export default class ClimaCNExtension extends Extension {
                 } catch (e) {
                     if (!this._enabled) return;
                     logError(`Open-Meteo parse error: ${e}`);
-                    this._showError();
+                    this._showError(_('备用数据源解析失败'), 'network');
                 }
             }
         );
@@ -1489,11 +1514,11 @@ export default class ClimaCNExtension extends Extension {
         }
 
         if (!this._apiKey || this._apiKey.trim() === '') {
-            this._showError(_('请在设置中配置 API Key'));
+            this._showError(_('请在设置中配置 API Key'), 'config');
             return;
         }
         if (!this._host) {
-            this._showError(_('请在设置中配置 API Host'));
+            this._showError(_('请在设置中配置 API Host'), 'config');
             return;
         }
         // _enabled 为真即保证 enable() 已跑完，_cancellable 必定存在
@@ -1532,7 +1557,7 @@ export default class ClimaCNExtension extends Extension {
                     const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
                     if (!json.condition || !json.temperature) {
                         logError(`响应缺少预期字段: ${JSON.stringify(json).slice(0, 300)}`);
-                        this._showError();
+                        this._showError(_('数据格式异常'), 'data');
                         return;
                     }
                     // 预报与空气质量并行拉取，两个都回来再更新界面。
@@ -1555,7 +1580,7 @@ export default class ClimaCNExtension extends Extension {
                 } catch (e) {
                     if (!this._enabled) return;
                     logError(`Network/parse error: ${e}`);
-                    this._showError();
+                    this._showError(_('获取失败'), 'network');
                 }
             }
         );
@@ -1796,6 +1821,76 @@ export default class ClimaCNExtension extends Extension {
     /* 10 天趋势折线：最高温与最低温两条线，每个点带圆点和温度数字。
      * 最高温的数字画在点的上方，最低温画在下方，两者不会互相压住。
      * 上下各预留一行文字的高度，纵向绘图区据此收缩。 */
+    /* 圆角横条路径。左右两端各一个半圆，中间由 closePath 连成一条。
+     * 半径收缩到不超过高度的一半，条太矮时不会画成畸形。 */
+    _roundedBarPath(cr, x, y, w, h) {
+        const r = Math.min(h / 2, w / 2);
+        if (r <= 0)
+            return;
+        cr.newSubPath();
+        cr.arc(x + r, y + r, r, Math.PI / 2, Math.PI * 1.5);        // 左端
+        cr.arc(x + w - r, y + r, r, -Math.PI / 2, Math.PI / 2);     // 右端
+        cr.closePath();
+    }
+
+    /* 预报行的温度条：把当天的最低~最高温放进未来 10 天的整体温区里，
+     * 位置和长度表示冷暖。纯文字看不出"哪天更冷"，横向一比就清楚了。
+     * 渐变的定义域是整条轨道（0 → width），所以颜色只取决于温度本身，
+     * 不同行之间可以直接比色，而不是各自从蓝渐变到橙。 */
+    _drawTempBar(area) {
+        const range = area?._climacnRange;
+        if (!range)
+            return;
+        const [width, height] = area.get_surface_size();
+        if (width <= 0 || height <= 0)
+            return;
+        const cr = area.get_context();
+        try {
+            const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
+            const barH = Math.min(height, Math.max(3, TEMP_BAR_HEIGHT * scaleFactor));
+            const y = (height - barH) / 2;
+            const { min, max, lo, hi } = range;
+            const span = (hi - lo) || 1;
+
+            // 轨道用主题前景色的低透明度，浅色与深色主题都不需要额外适配
+            const [hasFg, fg] = area.get_theme_node().lookup_color('color', false);
+            const track = hasFg
+                ? [fg.red / 255, fg.green / 255, fg.blue / 255]
+                : [0.5, 0.5, 0.5];
+            cr.setSourceRGBA(track[0], track[1], track[2], 0.18);
+            this._roundedBarPath(cr, 0, y, width, barH);
+            cr.fill();
+
+            const x0 = width * Math.min(Math.max(min - lo, 0), span) / span;
+            const x1 = width * Math.min(Math.max(max - lo, 0), span) / span;
+            // 温区极窄（昼夜温差 < 1°）时给个最小可见长度，否则看不见
+            const segW = Math.max(x1 - x0, barH);
+
+            const grad = new Cairo.LinearGradient(0, 0, width, 0);
+            for (const [off, r, g, b] of TEMP_RAMP)
+                grad.addColorStopRGBA(off, r, g, b, 0.95);
+            cr.setSource(grad);
+            this._roundedBarPath(cr, x0, y, Math.min(segW, width - x0), barH);
+            cr.fill();
+        } finally {
+            cr.$dispose();
+        }
+    }
+
+    /* 温度条随预报数据重建，因此不存字段引用：行被 remove_all_children()
+     * 销毁时，绘图区与其 repaint 信号一并消失。 */
+    _createTempBar(range) {
+        const area = new St.DrawingArea({
+            style_class: 'climacn-temp-bar',
+            width: TEMP_BAR_WIDTH,
+            height: TEMP_BAR_HEIGHT,
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        area._climacnRange = range;
+        area.connect('repaint', () => this._drawTempBar(area));
+        return area;
+    }
+
     _drawTrendChart() {
         const area = this._trendArea;
         if (!area)
@@ -1828,8 +1923,38 @@ export default class ClimaCNExtension extends Extension {
             const xAt = i => padX + (plotW * i) / (points.length - 1);
             const yAt = v => plotTop + plotH * (1 - (v - lo) / span);
 
-            const HIGH = [0.95, 0.55, 0.20, 0.95];
-            const LOW = [0.30, 0.60, 0.95, 0.95];
+            const HIGH = [...COLOR_HIGH, 0.95];
+            const LOW = [...COLOR_LOW, 0.95];
+
+            /* 面积填充必须画在折线之前，否则会盖住线。
+             * 分两层：高温线与低温线之间是昼夜温区；低温线以下再做一层
+             * 向下淡出的底色，两条线才不会显得悬空。 */
+            cr.newSubPath();
+            cr.moveTo(xAt(0), yAt(highs[0]));
+            for (let i = 1; i < highs.length; i++)
+                cr.lineTo(xAt(i), yAt(highs[i]));
+            for (let i = lows.length - 1; i >= 0; i--)
+                cr.lineTo(xAt(i), yAt(lows[i]));
+            cr.closePath();
+            // 纵向就是温度轴，同样用色阶；上暖下冷，位置要反过来
+            const bandGrad = new Cairo.LinearGradient(0, plotTop, 0, plotBottom);
+            for (const [off, r, g, b] of TEMP_RAMP)
+                bandGrad.addColorStopRGBA(1 - off, r, g, b, 0.30);
+            cr.setSource(bandGrad);
+            cr.fill();
+
+            cr.newSubPath();
+            cr.moveTo(xAt(0), yAt(lows[0]));
+            for (let i = 1; i < lows.length; i++)
+                cr.lineTo(xAt(i), yAt(lows[i]));
+            cr.lineTo(xAt(lows.length - 1), plotBottom);
+            cr.lineTo(xAt(0), plotBottom);
+            cr.closePath();
+            const groundGrad = new Cairo.LinearGradient(0, plotTop, 0, plotBottom);
+            groundGrad.addColorStopRGBA(0, COLOR_LOW[0], COLOR_LOW[1], COLOR_LOW[2], 0.18);
+            groundGrad.addColorStopRGBA(1, COLOR_LOW[0], COLOR_LOW[1], COLOR_LOW[2], 0.0);
+            cr.setSource(groundGrad);
+            cr.fill();
 
             const polyline = (values, rgba) => {
                 cr.setSourceRGBA(rgba[0], rgba[1], rgba[2], rgba[3]);
@@ -1975,6 +2100,15 @@ export default class ClimaCNExtension extends Extension {
         if (forecast && Array.isArray(forecast) && forecast.length > 0) {
             const dayNames = ['今天', '明天', '后天'];
             const count = Math.min(forecast.length, FORECAST_ROWS);
+
+            /* 温度条的归一化区间取整个 10 天，而不是逐日各画各的——
+             * 用同一个基准，行与行之间才能横向比较冷暖。 */
+            const lowsAll = forecast.map(d => Number(d.temperatureMin?.value))
+                                    .filter(Number.isFinite);
+            const highsAll = forecast.map(d => Number(d.temperatureMax?.value))
+                                     .filter(Number.isFinite);
+            const barLo = lowsAll.length ? Math.min(...lowsAll) : 0;
+            const barHi = highsAll.length ? Math.max(...highsAll) : 1;
             for (let i = 0; i < count; i++) {
                 const day = forecast[i];
                 const row = new St.BoxLayout({
@@ -2018,6 +2152,18 @@ export default class ClimaCNExtension extends Extension {
                 });
                 row.add_child(tempLabel);
 
+                /* 温度条：位置与长度表示当天温区在未来 10 天里的相对冷暖。
+                 * 数据缺失时放一个弹性空白，保证各行的状况文字仍然对齐。 */
+                const dayMin = Number(day.temperatureMin?.value);
+                const dayMax = Number(day.temperatureMax?.value);
+                if (Number.isFinite(dayMin) && Number.isFinite(dayMax)) {
+                    row.add_child(this._createTempBar(
+                        { min: dayMin, max: dayMax, lo: barLo, hi: barHi }));
+                } else {
+                    // 占位宽度与温度条一致，缺数据的那行不会让状况文字错位
+                    row.add_child(new St.Widget({ width: TEMP_BAR_WIDTH }));
+                }
+
                 // 天气状况
                 const conditionLabel = new St.Label({
                     text: day.daytime?.condition?.text || '--',
@@ -2039,9 +2185,24 @@ export default class ClimaCNExtension extends Extension {
         }
     }
 
-    _showError(message = _('获取失败')) {
-        this._applyIcon(this._weatherIcon, null, 'dialog-error-symbolic');
-        this._applyIcon(this._headerIcon, null, 'dialog-error-symbolic');
+    /* 顶栏出错时显示哪个图标。以前一律用通用错误框，用户看不出该去
+     * 检查网络、还是去改配置。分开之后一眼能定位到方向。
+     * 这些名字都在 Adwaita 里存在，且是 symbolic 单色，跟随主题着色。 */
+    _errorIconName(kind) {
+        switch (kind) {
+        case 'network': return 'network-error-symbolic';
+        case 'auth':    return 'dialog-password-symbolic';
+        case 'config':  return 'preferences-system-symbolic';
+        case 'data':    return 'dialog-warning-symbolic';
+        default:        return 'weather-severe-alert-symbolic';
+        }
+    }
+
+    /* kind 见 _errorIconName：network / auth / config / data，缺省为通用 */
+    _showError(message = _('获取失败'), kind = 'error') {
+        const iconName = this._errorIconName(kind);
+        this._applyIcon(this._weatherIcon, null, iconName);
+        this._applyIcon(this._headerIcon, null, iconName);
         this._tempLabel.text = 'N/A';
         this._headerTemp.text = 'N/A';
         this._headerCondition.text = message;

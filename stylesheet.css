@@ -173,6 +173,12 @@
   icon-size: 18px;
 }
 
+/* 温度条：宽高在 JS 中指定，必须固定宽度——若让它弹性伸缩，
+ * 各行的天气状况文字长短不同会导致条长不等，位置编码随之失效 */
+.climacn-temp-bar {
+  margin: 0px 2px;
+}
+
 /* 2. 温度范围 fixed 宽度，右侧状况文字因此始终从同一位置开始 */
 .climacn-forecast-temp {
   font-size: 0.9em;
