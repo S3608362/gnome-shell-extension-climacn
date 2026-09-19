@@ -29,8 +29,8 @@ const AQI_FONT_PX = 10;                   // 色环中心数值的字号（逻�
 const AQI_MAX_FAILURES = 2;               // 连续失败几次后不再请求空气质量
 const FORECAST_DAYS = 10;                 // 和风每日预报上限即 10 天，趋势折线用它
 const FORECAST_ROWS = 3;                  // 逐日行只展开前 3 天
-const SUN_ARC_HEIGHT = 52;                // 天空弧线的高度（逻辑像素，弧线上还要留出刻度）
-const MOON_ARC_HEIGHT = 46;               // 月亮弧线的高度
+const SUN_ARC_HEIGHT = 60;                // 天空弧线的高度（逻辑像素，弧线上还要留出刻度）
+const MOON_ARC_HEIGHT = 56;               // 月亮弧线的高度
 const MOON_DISC_RADIUS = 7;               // 弧上月相圆盘的半径（逻辑像素）
 
 /* 天空色阶：夜 → 天文暮光 → 航海暮光 → 民用暮光 → 白天。
@@ -46,13 +46,13 @@ const SKY_DAY       = [1.00, 0.72, 0.20];
 const MOON_LIT_ALPHA = 0.85;
 const MOON_DARK_ALPHA = 0.16;
 const TREND_CHART_HEIGHT = 64;            // 折线高度：上下各留一行数字的位置
-const TREND_CHART_WIDTH = 300;            // 折线宽度：放在子菜单里，需显式指定
+const TREND_CHART_WIDTH = 400;            // 折线宽度：放在子菜单里，需显式指定
 const TREND_LABEL_PX = 8;                 // 折线数值标注的字号（逻辑像素）
 const MOON_STRIP_HEIGHT = 30;             // 折线下方逐日月相条的高度
 const TEMP_BAR_HEIGHT = 8;                // 预报行温度条的高度（逻辑像素）
 /* 宽度必须是固定的：若让它弹性伸缩，各行的天气状况文字长短不同，
  * 条长就会不一样，"长度代表温差"这个编码立刻失效。 */
-const TEMP_BAR_WIDTH = 64;
+const TEMP_BAR_WIDTH = 110;
 
 /* 冷暖两色，温度条的两端与趋势折线的两条线共用，
  * 保证同一份数据在两处颜色对得上。取中间明度的橙与蓝：
@@ -1005,6 +1005,10 @@ export default class ClimaCNExtension extends Extension {
         });
         box.add_child(this._tempLabel);
         this._indicator.add_child(box);
+        /* 菜单宽度由这个样式类控制（见 stylesheet.css 的 .climacn-menu）。
+         * box 是 PopupMenuBase 的公开属性，直接加类比 set_style_class_name
+         * 安全——后者会把 Shell 自带的 popup-menu-content 一起覆盖掉。 */
+        this._indicator.menu.box.add_style_class_name('climacn-menu');
         this._buildMenu();
         Main.panel.addToStatusArea('climacn', this._indicator);
     }
@@ -2068,18 +2072,35 @@ export default class ClimaCNExtension extends Extension {
             const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
             const lineWidth = Math.max(1.5, 2 * scaleFactor);
             const pad = lineWidth + 4 * scaleFactor;
-            const radius = Math.min((width - 2 * pad) / 2, height - 2 * pad);
-            if (radius <= 0)
+            /* 用椭圆而不是正圆。正圆的半径被 min(宽/2, 高) 卡死，菜单加宽后
+             * 它只会缩在中间一小块，两侧留一大片空白。让横轴铺满可用宽度、
+             * 纵轴取高度预算，弧线就随菜单宽度自然变宽，也更接近天气应用里
+             * 那条横向时间轴的形状。 */
+            const rx = (width - 2 * pad) / 2;
+            const ry = height - 2 * pad;
+            if (rx <= 0 || ry <= 0)
                 return;
             const cx = width / 2;
-            const cy = height - pad;   // 圆心落在底边，画出来就是上半圆
+            const cy = height - pad;   // 圆心落在底边，画出来就是上半弧
+            const rxAt = ratio => cx + rx * Math.cos(this._arcTheta(ratio));
+            const ryAt = ratio => cy + ry * Math.sin(this._arcTheta(ratio));
+
+            // 上半椭圆路径。在缩放后的坐标系里画单位圆，路径落进设备空间后
+            // 再 restore，这样描边宽度不会被横纵比拉变形。
+            const ellipsePath = () => {
+                cr.save();
+                cr.translate(cx, cy);
+                cr.scale(rx, ry);
+                cr.arc(0, 0, 1, Math.PI, 2 * Math.PI);
+                cr.restore();
+            };
 
             cr.setLineWidth(lineWidth);
             cr.setLineCap(Cairo.LineCap.ROUND);
 
             // 底层轨道：没有曙暮光数据时它就是最终形态
             cr.setSourceRGBA(0.5, 0.5, 0.5, 0.25);
-            cr.arc(cx, cy, radius, Math.PI, 2 * Math.PI);
+            ellipsePath();
             cr.stroke();
 
             const span = sunArcSpan(astro);
@@ -2097,9 +2118,8 @@ export default class ClimaCNExtension extends Extension {
                 let prev = null;
                 for (let i = 0; i <= SEGMENTS; i++) {
                     const ratio = i / SEGMENTS;
-                    const th = this._arcTheta(ratio);
-                    const px = cx + radius * Math.cos(th);
-                    const py = cy + radius * Math.sin(th);
+                    const px = rxAt(ratio);
+                    const py = ryAt(ratio);
                     if (prev) {
                         // 用该段中点时刻取色，段与段之间自然过渡
                         const mid = span.start + (ratio - 0.5 / SEGMENTS) * total;
@@ -2114,31 +2134,33 @@ export default class ClimaCNExtension extends Extension {
             } else {
                 // 兜底数据源只有日出日落，画一条纯色弧
                 cr.setSourceRGBA(SKY_DAY[0], SKY_DAY[1], SKY_DAY[2], 0.9);
-                cr.arc(cx, cy, radius, Math.PI, 2 * Math.PI);
+                ellipsePath();
                 cr.stroke();
             }
 
-            // 日出、日落刻度
+            /* 日出、日落刻度。沿"圆心→弧上点"的方向朝内外各探出一截。
+             * 对椭圆来说这个方向只在长短轴端点处才是真正的法线，中间会略偏，
+             * 但刻度很短，看上去仍然垂直于弧线。 */
             const fg = this._themeColor(area);
             cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.5);
             cr.setLineWidth(Math.max(1, 1.2 * scaleFactor));
-            const t0 = radius - 3.5 * scaleFactor;
-            const t1 = radius + 3.5 * scaleFactor;
+            const tick = 3.5 * scaleFactor;
             for (const m of [astro.sunrise, astro.sunset]) {
-                const th = this._arcTheta(ratioAt(m));
-                const dx = Math.cos(th), dy = Math.sin(th);
-                cr.moveTo(cx + dx * t0, cy + dy * t0);
-                cr.lineTo(cx + dx * t1, cy + dy * t1);
+                const r = ratioAt(m);
+                const px = rxAt(r), py = ryAt(r);
+                const dx = (px - cx) / rx, dy = (py - cy) / ry;
+                const len = Math.hypot(dx, dy) || 1;
+                cr.moveTo(px - dx / len * tick, py - dy / len * tick);
+                cr.lineTo(px + dx / len * tick, py + dy / len * tick);
             }
             cr.stroke();
 
             const pos = this._sunPosition;
             if (!pos)
                 return;
-            const theta = this._arcTheta(pos.ratio);
             const alpha = pos.isDay ? 1 : 0.45;
             cr.setSourceRGBA(SKY_DAY[0], SKY_DAY[1], SKY_DAY[2], alpha);
-            cr.arc(cx + radius * Math.cos(theta), cy + radius * Math.sin(theta),
+            cr.arc(rxAt(pos.ratio), ryAt(pos.ratio),
                    Math.max(3.5, 4.5 * scaleFactor), 0, 2 * Math.PI);
             cr.fill();
         } finally {
@@ -2208,36 +2230,44 @@ export default class ClimaCNExtension extends Extension {
             const lineWidth = Math.max(1.5, 2 * scaleFactor);
             const pad = lineWidth + 3 * scaleFactor;
             const discR = MOON_DISC_RADIUS * scaleFactor;
-            // 圆盘骑在弧线上，顶部要额外让出一个半径的高度
-            const radius = Math.min((width - 2 * pad) / 2, height - pad - discR - pad);
-            if (radius <= 0)
+            // 与太阳弧线同样用椭圆铺满宽度；圆盘骑在弧上，纵轴要留出它的高度
+            const rx = (width - 2 * pad) / 2;
+            const ry = height - pad - discR - pad;
+            if (rx <= 0 || ry <= 0)
                 return;
             const cx = width / 2;
             const cy = height - pad;
             const fg = this._themeColor(area);
+            const pxAt = ratio => cx + rx * Math.cos(this._arcTheta(ratio));
+            const pyAt = ratio => cy + ry * Math.sin(this._arcTheta(ratio));
 
             cr.setLineWidth(lineWidth);
             cr.setLineCap(Cairo.LineCap.ROUND);
             cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.25);
-            cr.arc(cx, cy, radius, Math.PI, 2 * Math.PI);
+            cr.save();
+            cr.translate(cx, cy);
+            cr.scale(rx, ry);
+            cr.arc(0, 0, 1, Math.PI, 2 * Math.PI);
+            cr.restore();
             cr.stroke();
 
             const pos = this._moonPosition;
             if (!pos) {
                 // 拿不到当前时刻（例如刚启用还没算），把月相画在弧顶
-                this._drawMoonDisc(cr, cx, cy - radius, discR, moon.phase, fg, 0.6);
+                this._drawMoonDisc(cr, cx, cy - ry, discR, moon.phase, fg, 0.6);
                 return;
             }
-            const theta = this._arcTheta(pos.ratio);
             const alpha = pos.isUp ? 1 : 0.4;
             cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.85 * alpha);
-            cr.arc(cx, cy, radius, Math.PI, theta);
+            cr.save();
+            cr.translate(cx, cy);
+            cr.scale(rx, ry);
+            cr.arc(0, 0, 1, Math.PI, this._arcTheta(pos.ratio));
+            cr.restore();
             cr.stroke();
 
-            this._drawMoonDisc(
-                cr,
-                cx + radius * Math.cos(theta), cy + radius * Math.sin(theta),
-                discR, moon.phase, fg, alpha);
+            this._drawMoonDisc(cr, pxAt(pos.ratio), pyAt(pos.ratio),
+                               discR, moon.phase, fg, alpha);
         } finally {
             cr.$dispose();
         }
@@ -2610,10 +2640,14 @@ export default class ClimaCNExtension extends Extension {
                     row.add_child(new St.Widget({ width: TEMP_BAR_WIDTH }));
                 }
 
-                // 天气状况
+                /* 天气状况占掉行尾的剩余宽度。
+                 * 让这一列弹性伸缩、而温度条保持固定宽度，是因为条长代表温差：
+                 * 若改成条去抢占剩余空间，各行的状况文字长短不同，条长就会
+                 * 参差不齐，那个编码就废了。 */
                 const conditionLabel = new St.Label({
                     text: day.daytime?.condition?.text || '--',
                     style_class: 'climacn-forecast-condition',
+                    x_expand: true,
                     y_align: Clutter.ActorAlign.CENTER
                 });
                 row.add_child(conditionLabel);
