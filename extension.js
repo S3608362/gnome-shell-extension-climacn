@@ -29,10 +29,26 @@ const AQI_FONT_PX = 10;                   // 色环中心数值的字号（逻�
 const AQI_MAX_FAILURES = 2;               // 连续失败几次后不再请求空气质量
 const FORECAST_DAYS = 10;                 // 和风每日预报上限即 10 天，趋势折线用它
 const FORECAST_ROWS = 3;                  // 逐日行只展开前 3 天
-const SUN_ARC_HEIGHT = 46;                // 日出日落弧线的高度（逻辑像素）
+const SUN_ARC_HEIGHT = 52;                // 天空弧线的高度（逻辑像素，弧线上还要留出刻度）
+const MOON_ARC_HEIGHT = 46;               // 月亮弧线的高度
+const MOON_DISC_RADIUS = 7;               // 弧上月相圆盘的半径（逻辑像素）
+
+/* 天空色阶：夜 → 天文暮光 → 航海暮光 → 民用暮光 → 白天。
+ * 三段暮光分别对应太阳位于地平线下 18°~12°、12°~6°、6°~0°，
+ * 和风把它们各自的起止时刻都给了，所以色带能落在真实时间上。 */
+const SKY_ASTRONOMY = [0.22, 0.26, 0.52];
+const SKY_NAUTICAL  = [0.30, 0.38, 0.68];
+const SKY_CIVIL     = [0.58, 0.52, 0.76];
+const SKY_DAY       = [1.00, 0.72, 0.20];
+
+/* 月亮弧线用主题前景色画：亮面用较高透明度、暗面用很低的一层，
+ * 这样深色与浅色主题下都不需要额外的配色分支。 */
+const MOON_LIT_ALPHA = 0.85;
+const MOON_DARK_ALPHA = 0.16;
 const TREND_CHART_HEIGHT = 64;            // 折线高度：上下各留一行数字的位置
 const TREND_CHART_WIDTH = 300;            // 折线宽度：放在子菜单里，需显式指定
 const TREND_LABEL_PX = 8;                 // 折线数值标注的字号（逻辑像素）
+const MOON_STRIP_HEIGHT = 30;             // 折线下方逐日月相条的高度
 const TEMP_BAR_HEIGHT = 8;                // 预报行温度条的高度（逻辑像素）
 /* 宽度必须是固定的：若让它弹性伸缩，各行的天气状况文字长短不同，
  * 条长就会不一样，"长度代表温差"这个编码立刻失效。 */
@@ -271,27 +287,136 @@ function formatClock(minutes) {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
-/* 取当天的日出日落（分钟数）。日落早于日出说明数据异常，按无数据处理。 */
-function parseSunTimes(days) {
-    const astro = Array.isArray(days) ? days[0]?.astro : null;
-    const sunrise = parseClockMinutes(astro?.sunrise);
-    const sunset = parseClockMinutes(astro?.sunset);
-    if (sunrise === null || sunset === null || sunset <= sunrise)
+/* 八个主导月相。waxing = 亮面在右（盈月）。
+ *
+ * lit 是被照亮的比例，按 (1-cos θ)/2 算，θ 是相位角：
+ * 八个主相位相隔 45°，于是依次是 0、0.146、0.5、0.854、1，而不是
+ * 想当然的 0、0.25、0.5、0.75、1 —— 后者画出来的蛾眉月会偏胖、
+ * 盈凸月偏瘦。这里取每个区间的中点（θ = 45°/135°），
+ * 因为和风返回的是当天的主导相位，落在以主相位为中心的 ±22.5° 里。 */
+const MOON_PHASES = {
+    'new-moon':        { name: '新月',   lit: 0.000, waxing: true  },
+    'waxing-crescent': { name: '蛾眉月', lit: 0.146, waxing: true  },
+    'first-quarter':   { name: '上弦月', lit: 0.500, waxing: true  },
+    'waxing-gibbous':  { name: '盈凸月', lit: 0.854, waxing: true  },
+    'full-moon':       { name: '满月',   lit: 1.000, waxing: true  },
+    'waning-gibbous':  { name: '亏凸月', lit: 0.854, waxing: false },
+    'last-quarter':    { name: '下弦月', lit: 0.500, waxing: false },
+    'waning-crescent': { name: '残月',   lit: 0.146, waxing: false },
+};
+
+/* 月出月落。月落常常落在次日（界面按 00:03(+1) 理解），
+ * 这时分钟数反而比月出小，补上一天再比较，弧线才不会左右颠倒。
+ * 极地或当天不升不落时字段缺失，返回 null，整行隐藏。 */
+function parseMoon(astro) {
+    let moonrise = parseClockMinutes(astro?.moonrise);
+    let moonset = parseClockMinutes(astro?.moonset);
+    if (moonrise === null || moonset === null)
         return null;
-    return { sunrise, sunset };
+    if (moonset <= moonrise)
+        moonset += 24 * 60;
+    return { moonrise, moonset, phase: MOON_PHASES[astro?.moonPhase] ?? null };
 }
 
-/* 太阳在日出日落之间的位置：0 = 日出，1 = 日落。
- * 夜间把位置夹到两端并标记 isDay=false，界面据此弱化显示。 */
-function sunArcPosition(nowMinutes, sunTimes) {
-    if (!sunTimes)
+/* 当天全部天文事件（分钟数）。时间形如 "2026-09-15T06:12+08:00"，只取时刻。
+ * 和风 v1 的 astro 同时给了三段曙暮光、月出月落和月相，全都在这一个每日
+ * 预报响应里，所以把这些内容画出来不会增加任何请求。 */
+function parseAstro(days) {
+    const astro = Array.isArray(days) ? days[0]?.astro : null;
+    if (!astro)
         return null;
-    const { sunrise, sunset } = sunTimes;
-    const ratio = (nowMinutes - sunrise) / (sunset - sunrise);
+    const sunrise = parseClockMinutes(astro.sunrise);
+    const sunset = parseClockMinutes(astro.sunset);
+    if (sunrise === null || sunset === null || sunset <= sunrise)
+        return null;
+    return {
+        sunrise, sunset,
+        civilDawn: parseClockMinutes(astro.civilDawn),
+        civilDusk: parseClockMinutes(astro.civilDusk),
+        nauticalDawn: parseClockMinutes(astro.nauticalDawn),
+        nauticalDusk: parseClockMinutes(astro.nauticalDusk),
+        astronomicalDawn: parseClockMinutes(astro.astronomicalDawn),
+        astronomicalDusk: parseClockMinutes(astro.astronomicalDusk),
+        moon: parseMoon(astro),
+    };
+}
+
+/* 弧线的时间跨度。优先用天文晨光始→天文暮光终，这样三段曙暮光都能画进去；
+ * 取不到时退回日出→日落，弧线本身照常显示，只是少了暮光段。 */
+function sunArcSpan(astro) {
+    const { astronomicalDawn: a, astronomicalDusk: b, sunrise, sunset } = astro;
+    if (a !== null && b !== null && b > a)
+        return { start: a, end: b, hasTwilight: true };
+    return { start: sunrise, end: sunset, hasTwilight: false };
+}
+
+/* 太阳在弧上的位置：0 = 弧线起点，1 = 终点。
+ * isDay 表示太阳是否在地平线以上，用来决定圆点是否弱化。 */
+function sunArcPosition(nowMinutes, astro) {
+    if (!astro)
+        return null;
+    const { start, end } = sunArcSpan(astro);
+    const ratio = (nowMinutes - start) / (end - start);
     return {
         ratio: Math.min(Math.max(ratio, 0), 1),
-        isDay: nowMinutes >= sunrise && nowMinutes <= sunset,
+        isDay: nowMinutes >= astro.sunrise && nowMinutes <= astro.sunset,
     };
+}
+
+/* 天空色阶在某时刻的取色：在相邻两个节点之间线性插值。
+ * 节点形如「航海晨光始 → 航海暮光色」，缺字段的节点先过滤掉，
+ * 这样兜底数据源只有日出日落时也能正常工作。 */
+function skyColorAt(minutes, astro) {
+    const nodes = [
+        [astro.astronomicalDawn, SKY_ASTRONOMY],
+        [astro.nauticalDawn,     SKY_NAUTICAL],
+        [astro.civilDawn,        SKY_CIVIL],
+        [astro.sunrise,          SKY_DAY],
+        [astro.sunset,           SKY_DAY],
+        [astro.civilDusk,        SKY_CIVIL],
+        [astro.nauticalDusk,     SKY_NAUTICAL],
+        [astro.astronomicalDusk, SKY_ASTRONOMY],
+    ].filter(e => e[0] !== null && e[0] !== undefined)
+     .sort((a, b) => a[0] - b[0]);
+
+    if (nodes.length === 0)
+        return SKY_DAY;
+    if (minutes <= nodes[0][0])
+        return nodes[0][1];
+    for (let i = 1; i < nodes.length; i++) {
+        const [m1, c1] = nodes[i - 1];
+        const [m2, c2] = nodes[i];
+        if (minutes <= m2) {
+            const k = m2 > m1 ? (minutes - m1) / (m2 - m1) : 1;
+            return [
+                c1[0] + (c2[0] - c1[0]) * k,
+                c1[1] + (c2[1] - c1[1]) * k,
+                c1[2] + (c2[2] - c1[2]) * k,
+            ];
+        }
+    }
+    return nodes[nodes.length - 1][1];
+}
+
+/* 月亮在月出→月落这条弧上的位置。
+ * 月落可能跨过午夜，所以要把「现在」也放到同一条时间轴上比较：
+ * 比月出早的时刻加一天，才不会把它误判成"已经落下"。 */
+function moonArcPosition(nowMinutes, moon) {
+    if (!moon)
+        return null;
+    const now = nowMinutes < moon.moonrise ? nowMinutes + 24 * 60 : nowMinutes;
+    const ratio = (now - moon.moonrise) / (moon.moonset - moon.moonrise);
+    return {
+        ratio: Math.min(Math.max(ratio, 0), 1),
+        isUp: now >= moon.moonrise && now <= moon.moonset,
+    };
+}
+
+/* 逐日主导月相。取不到的填 null，绘制时跳过该格但保留位置。 */
+function parseMoonPhases(days) {
+    if (!Array.isArray(days))
+        return [];
+    return days.map(d => MOON_PHASES[d?.astro?.moonPhase] ?? null);
 }
 
 /* 折线取值：每天的最高/最低温。缺数据的日子跳过。 */
@@ -489,8 +614,10 @@ export default class ClimaCNExtension extends Extension {
         // 自绘图表的 repaint、刷新按钮的 activate 信号 ID，
         // 同样要在 disable() 里断开
         this._sunArcRepaintId = 0;
+        this._moonArcRepaintId = 0;
         this._aqiRepaintId = 0;
         this._trendRepaintId = 0;
+        this._trendMoonRepaintId = 0;
         this._refreshActivateId = 0;
         this._session = new Soup.Session();
         this._cancellable = new Gio.Cancellable();
@@ -518,7 +645,10 @@ export default class ClimaCNExtension extends Extension {
         this._aqi = null;
         this._aqiFailCount = 0;
         this._sunPosition = null;
+        this._astro = null;
+        this._moonPosition = null;
         this._trendPoints = [];
+        this._moonPhases = [];
         this._usingFallback = false;
 
         // _selectCity() 会连续写三个键，期间置位以免监听器重复发起请求
@@ -708,7 +838,10 @@ export default class ClimaCNExtension extends Extension {
         this._aqiFailCount = 0;
         this._pressureHistory = [];
         this._sunPosition = null;
+        this._astro = null;
+        this._moonPosition = null;
         this._trendPoints = [];
+        this._moonPhases = [];
         this._usingFallback = false;
         this._lastFetchAt = 0;
         this._onBattery = false;
@@ -742,6 +875,14 @@ export default class ClimaCNExtension extends Extension {
             this._sunArcArea?.disconnect(this._sunArcRepaintId);
             this._sunArcRepaintId = 0;
         }
+        if (this._moonArcRepaintId) {
+            this._moonArcArea?.disconnect(this._moonArcRepaintId);
+            this._moonArcRepaintId = 0;
+        }
+        if (this._trendMoonRepaintId) {
+            this._trendMoonArea?.disconnect(this._trendMoonRepaintId);
+            this._trendMoonRepaintId = 0;
+        }
         if (this._aqiRepaintId) {
             this._aqiArea?.disconnect(this._aqiRepaintId);
             this._aqiRepaintId = 0;
@@ -764,6 +905,17 @@ export default class ClimaCNExtension extends Extension {
         this._sunsetLabel = null;
         this._sunArcItem?.destroy();
         this._sunArcItem = null;
+
+        this._moonriseLabel?.destroy();
+        this._moonriseLabel = null;
+        this._moonArcArea?.destroy();
+        this._moonArcArea = null;
+        this._moonsetLabel?.destroy();
+        this._moonsetLabel = null;
+        this._moonPhaseLabel?.destroy();
+        this._moonPhaseLabel = null;
+        this._moonArcItem?.destroy();
+        this._moonArcItem = null;
 
         this._aqiArea?.destroy();
         this._aqiArea = null;
@@ -798,6 +950,8 @@ export default class ClimaCNExtension extends Extension {
         this._forecastContainer = null;
         this._trendArea?.destroy();
         this._trendArea = null;
+        this._trendMoonArea?.destroy();
+        this._trendMoonArea = null;
         this._trendItem?.destroy();
         this._trendItem = null;
 
@@ -867,6 +1021,7 @@ export default class ClimaCNExtension extends Extension {
 
         this._buildDetails();
         this._buildSunArc();
+        this._buildMoonArc();
         this._buildForecast();
         this._buildFooter();
     }
@@ -907,6 +1062,59 @@ export default class ClimaCNExtension extends Extension {
         this._sunArcItem.add_child(box);
         this._sunArcItem.visible = false;   // 没有 astro 数据时整行隐藏
         this._indicator.menu.addMenuItem(this._sunArcItem);
+    }
+
+    /* 月亮弧线：月出月落时刻 + 弧上的月相圆盘 + 月相名称。
+     * 和太阳弧线用的是同一个每日预报响应，不额外发请求。
+     * 极地等取不到月出月落的情况下整行隐藏。 */
+    _buildMoonArc() {
+        const outer = new St.BoxLayout({
+            style_class: 'climacn-moon-arc',
+            vertical: true,
+            x_expand: true
+        });
+
+        const row = new St.BoxLayout({
+            style_class: 'climacn-sun-arc',
+            y_align: Clutter.ActorAlign.CENTER,
+            x_expand: true
+        });
+
+        this._moonriseLabel = new St.Label({
+            text: '--:--',
+            style_class: 'climacn-sun-time',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        row.add_child(this._moonriseLabel);
+
+        this._moonArcArea = new St.DrawingArea({
+            style_class: 'climacn-sun-arc-canvas',
+            x_expand: true,
+            height: MOON_ARC_HEIGHT,
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        this._moonArcRepaintId = this._moonArcArea.connect('repaint', () => this._drawMoonArc());
+        row.add_child(this._moonArcArea);
+
+        this._moonsetLabel = new St.Label({
+            text: '--:--',
+            style_class: 'climacn-sun-time',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        row.add_child(this._moonsetLabel);
+        outer.add_child(row);
+
+        this._moonPhaseLabel = new St.Label({
+            text: '',
+            style_class: 'climacn-moon-phase',
+            x_align: Clutter.ActorAlign.CENTER
+        });
+        outer.add_child(this._moonPhaseLabel);
+
+        this._moonArcItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        this._moonArcItem.add_child(outer);
+        this._moonArcItem.visible = false;
+        this._indicator.menu.addMenuItem(this._moonArcItem);
     }
 
     /* 卡片头：大图标 + 大号温度 + 天气状况，城市名降为下方小字。
@@ -1105,10 +1313,69 @@ export default class ClimaCNExtension extends Extension {
         });
         this._trendRepaintId = this._trendArea.connect('repaint', () => this._drawTrendChart());
 
+        /* 折线下面再放一排每日月相。数据和折线同源（同一个每日预报响应），
+         * 但含义不同：折线看冷暖走势，月相看这十天里月亮怎么圆缺。 */
+        const box = new St.BoxLayout({
+            style_class: 'climacn-trend-box',
+            vertical: true
+        });
+        box.add_child(this._trendArea);
+
+        this._trendMoonArea = new St.DrawingArea({
+            style_class: 'climacn-trend-moons',
+            width: TREND_CHART_WIDTH,
+            height: MOON_STRIP_HEIGHT
+        });
+        this._trendMoonRepaintId =
+            this._trendMoonArea.connect('repaint', () => this._drawTrendMoons());
+        box.add_child(this._trendMoonArea);
+
         const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
-        item.add_child(this._trendArea);
+        item.add_child(box);
         this._trendItem.menu.addMenuItem(item);
         this._indicator.menu.addMenuItem(this._trendItem);
+    }
+
+    /* 逐日月相条：每格一个圆盘 + 照亮百分比，横向排开看圆缺变化。
+     * 格宽取自控件宽度，因此点和数据一一对应，缺数据的那格留白不占位。 */
+    _drawTrendMoons() {
+        const area = this._trendMoonArea;
+        const phases = this._moonPhases;
+        if (!area || !Array.isArray(phases) || phases.length === 0)
+            return;
+        const [width, height] = area.get_surface_size();
+        if (width <= 0 || height <= 0)
+            return;
+        const cr = area.get_context();
+        try {
+            const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
+            const fg = this._themeColor(area);
+            const cellW = width / phases.length;
+            const r = Math.max(3, 6 * scaleFactor);
+            const cy = r + 2 * scaleFactor;
+
+            const layout = PangoCairo.create_layout(cr);
+            let themeFont = null;
+            try {
+                themeFont = area.get_theme_node().get_font();
+            } catch (_e) {
+                themeFont = null;
+            }
+            layout.set_font_description(cairoFontDescription(themeFont, 7, scaleFactor));
+
+            for (let i = 0; i < phases.length; i++) {
+                const phase = phases[i];
+                if (!phase)
+                    continue;
+                const cx = cellW * (i + 0.5);
+                this._drawMoonDisc(cr, cx, cy, r, phase, fg, 0.95);
+                cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.6);
+                drawCenteredText(cr, layout, `${Math.round(phase.lit * 100)}%`,
+                                 cx, height - 5 * scaleFactor);
+            }
+        } finally {
+            cr.$dispose();
+        }
     }
 
     _buildFooter() {
@@ -1771,18 +2038,36 @@ export default class ClimaCNExtension extends Extension {
         }
     }
 
-    /* 日出日落弧线：上半圆轨道 + 已走过的弧段高亮 + 太阳圆点。
-     * 夜间把太阳点弱化并夹在两端。 */
+    /* 弧线上某时刻的位置比例 → 圆心角。cairo 以 y 轴向下为正，
+     * Math.PI→2*Math.PI 即上半圆，从左端走到右端。 */
+    _arcTheta(ratio) {
+        return Math.PI + Math.min(Math.max(ratio, 0), 1) * Math.PI;
+    }
+
+    /* 取主题前景色。绘制的图形跟着主题文字色走，
+     * 深色与浅色主题都不需要另写一套配色。 */
+    _themeColor(area) {
+        const [hasFg, fg] = area.get_theme_node().lookup_color('color', false);
+        return hasFg ? [fg.red / 255, fg.green / 255, fg.blue / 255] : [0.5, 0.5, 0.5];
+    }
+
+    /* 日出日落弧线。上半圆代表从天文晨光始到天文暮光终的一整天，
+     * 弧体按三段曙暮光着色：夜 → 天文 → 航海 → 民用 → 白天。
+     * 日出日落处打刻度（弧线现在跨得比昼长更宽，这两个时刻要看得出来），
+     * 太阳圆点标出当前时刻，落到地平线以下时弱化。 */
     _drawSunArc() {
         const area = this._sunArcArea;
-        if (!area)
+        const astro = this._astro;
+        if (!area || !astro)
             return;
         const [width, height] = area.get_surface_size();
+        if (width <= 0 || height <= 0)
+            return;
         const cr = area.get_context();
         try {
             const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
             const lineWidth = Math.max(1.5, 2 * scaleFactor);
-            const pad = lineWidth + 3 * scaleFactor;
+            const pad = lineWidth + 4 * scaleFactor;
             const radius = Math.min((width - 2 * pad) / 2, height - 2 * pad);
             if (radius <= 0)
                 return;
@@ -1792,27 +2077,167 @@ export default class ClimaCNExtension extends Extension {
             cr.setLineWidth(lineWidth);
             cr.setLineCap(Cairo.LineCap.ROUND);
 
-            // 整条轨道。cairo 的角度以 y 轴向下为正，Math.PI→2*Math.PI 即上半圆
+            // 底层轨道：没有曙暮光数据时它就是最终形态
             cr.setSourceRGBA(0.5, 0.5, 0.5, 0.25);
             cr.arc(cx, cy, radius, Math.PI, 2 * Math.PI);
+            cr.stroke();
+
+            const span = sunArcSpan(astro);
+            const total = span.end - span.start;
+            if (total <= 0)
+                return;
+            const ratioAt = m => Math.min(Math.max((m - span.start) / total, 0), 1);
+
+            /* 按角度分段上色，而不是用横向的线性渐变。
+             * 弧是半圆，黎明黄昏那两段几乎是竖直的：一天里 10% 的时间只对应
+             * x 方向 2% 的宽度，渐变会把整段曙暮光压成两三个像素，色标位置
+             * 算得再准也看不出来。角度才与时间线性对应，所以逐段取色。 */
+            if (span.hasTwilight) {
+                const SEGMENTS = 96;
+                let prev = null;
+                for (let i = 0; i <= SEGMENTS; i++) {
+                    const ratio = i / SEGMENTS;
+                    const th = this._arcTheta(ratio);
+                    const px = cx + radius * Math.cos(th);
+                    const py = cy + radius * Math.sin(th);
+                    if (prev) {
+                        // 用该段中点时刻取色，段与段之间自然过渡
+                        const mid = span.start + (ratio - 0.5 / SEGMENTS) * total;
+                        const c = skyColorAt(mid, astro);
+                        cr.setSourceRGBA(c[0], c[1], c[2], 1);
+                        cr.moveTo(prev[0], prev[1]);
+                        cr.lineTo(px, py);
+                        cr.stroke();
+                    }
+                    prev = [px, py];
+                }
+            } else {
+                // 兜底数据源只有日出日落，画一条纯色弧
+                cr.setSourceRGBA(SKY_DAY[0], SKY_DAY[1], SKY_DAY[2], 0.9);
+                cr.arc(cx, cy, radius, Math.PI, 2 * Math.PI);
+                cr.stroke();
+            }
+
+            // 日出、日落刻度
+            const fg = this._themeColor(area);
+            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.5);
+            cr.setLineWidth(Math.max(1, 1.2 * scaleFactor));
+            const t0 = radius - 3.5 * scaleFactor;
+            const t1 = radius + 3.5 * scaleFactor;
+            for (const m of [astro.sunrise, astro.sunset]) {
+                const th = this._arcTheta(ratioAt(m));
+                const dx = Math.cos(th), dy = Math.sin(th);
+                cr.moveTo(cx + dx * t0, cy + dy * t0);
+                cr.lineTo(cx + dx * t1, cy + dy * t1);
+            }
             cr.stroke();
 
             const pos = this._sunPosition;
             if (!pos)
                 return;
-            const theta = Math.PI + pos.ratio * Math.PI;
-            const alpha = pos.isDay ? 1 : 0.3;
-
-            // 已经走过的弧段
-            cr.setSourceRGBA(1.0, 0.72, 0.2, alpha * 0.9);
-            cr.arc(cx, cy, radius, Math.PI, theta);
-            cr.stroke();
-
-            // 太阳圆点
-            cr.setSourceRGBA(1.0, 0.72, 0.2, alpha);
+            const theta = this._arcTheta(pos.ratio);
+            const alpha = pos.isDay ? 1 : 0.45;
+            cr.setSourceRGBA(SKY_DAY[0], SKY_DAY[1], SKY_DAY[2], alpha);
             cr.arc(cx + radius * Math.cos(theta), cy + radius * Math.sin(theta),
                    Math.max(3.5, 4.5 * scaleFactor), 0, 2 * Math.PI);
             cr.fill();
+        } finally {
+            cr.$dispose();
+        }
+    }
+
+    /* 月相圆盘。先铺一层低透明度的整圆当暗面，再把被照亮的部分填实。
+     * 亮区由「外侧半圆 + 内侧终止线半椭圆」围成：终止线在凸月时向暗面
+     * 鼓出、在蛾眉月时向亮面凹进，半宽为 |1-2k|·r（k 是照亮比例）。
+     * 亏月整体水平镜像一下即可，不必再推一套反向公式。 */
+    _drawMoonDisc(cr, cx, cy, r, phase, fg, alpha = 1) {
+        if (!(r > 0))
+            return;
+        const lit = Math.min(Math.max(phase?.lit ?? 0, 0), 1);
+
+        cr.setSourceRGBA(fg[0], fg[1], fg[2], MOON_DARK_ALPHA * alpha);
+        cr.arc(cx, cy, r, 0, 2 * Math.PI);
+        cr.fill();
+
+        if (lit > 0.001) {
+            cr.save();
+            if (!(phase?.waxing ?? true)) {   // 亏月：镜像后与盈月共用同一套路径
+                cr.translate(cx, cy);
+                cr.scale(-1, 1);
+                cr.translate(-cx, -cy);
+            }
+            // 凸月/满月时半宽趋近 r，蛾眉/新月时趋近 0；
+            // 完全取 0 会让路径退化，留一个极小值
+            const a = Math.max(Math.abs(1 - 2 * lit), 0.001);
+            cr.newSubPath();
+            cr.arc(cx, cy, r, -Math.PI / 2, Math.PI / 2);   // 外侧：右半圆
+            cr.save();
+            cr.translate(cx, cy);
+            cr.scale(a, 1);
+            if (lit > 0.5)
+                cr.arc(0, 0, r, Math.PI / 2, 3 * Math.PI / 2);       // 凸月：向左鼓
+            else
+                cr.arcNegative(0, 0, r, Math.PI / 2, -Math.PI / 2);  // 蛾眉：向右凹
+            cr.restore();
+            cr.closePath();
+            cr.setSourceRGBA(fg[0], fg[1], fg[2], MOON_LIT_ALPHA * alpha);
+            cr.fill();
+            cr.restore();
+        }
+
+        // 描边：满月与新月光靠填充分不出边界
+        cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.45 * alpha);
+        cr.setLineWidth(Math.max(0.8, r * 0.14));
+        cr.arc(cx, cy, r, 0, 2 * Math.PI);
+        cr.stroke();
+    }
+
+    /* 月亮弧线：月出 → 月落，弧上放一个随当前月相变化的圆盘。
+     * 结构与太阳弧线相同，只是把「白天」换成「月亮在地平线上」。 */
+    _drawMoonArc() {
+        const area = this._moonArcArea;
+        const moon = this._astro?.moon;
+        if (!area || !moon)
+            return;
+        const [width, height] = area.get_surface_size();
+        if (width <= 0 || height <= 0)
+            return;
+        const cr = area.get_context();
+        try {
+            const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
+            const lineWidth = Math.max(1.5, 2 * scaleFactor);
+            const pad = lineWidth + 3 * scaleFactor;
+            const discR = MOON_DISC_RADIUS * scaleFactor;
+            // 圆盘骑在弧线上，顶部要额外让出一个半径的高度
+            const radius = Math.min((width - 2 * pad) / 2, height - pad - discR - pad);
+            if (radius <= 0)
+                return;
+            const cx = width / 2;
+            const cy = height - pad;
+            const fg = this._themeColor(area);
+
+            cr.setLineWidth(lineWidth);
+            cr.setLineCap(Cairo.LineCap.ROUND);
+            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.25);
+            cr.arc(cx, cy, radius, Math.PI, 2 * Math.PI);
+            cr.stroke();
+
+            const pos = this._moonPosition;
+            if (!pos) {
+                // 拿不到当前时刻（例如刚启用还没算），把月相画在弧顶
+                this._drawMoonDisc(cr, cx, cy - radius, discR, moon.phase, fg, 0.6);
+                return;
+            }
+            const theta = this._arcTheta(pos.ratio);
+            const alpha = pos.isUp ? 1 : 0.4;
+            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.85 * alpha);
+            cr.arc(cx, cy, radius, Math.PI, theta);
+            cr.stroke();
+
+            this._drawMoonDisc(
+                cr,
+                cx + radius * Math.cos(theta), cy + radius * Math.sin(theta),
+                discR, moon.phase, fg, alpha);
         } finally {
             cr.$dispose();
         }
@@ -2073,28 +2498,49 @@ export default class ClimaCNExtension extends Extension {
             this._forecastRowsBox.remove_all_children();
         }
 
-        // ---- 日出日落弧线 ----
-        const sunTimes = parseSunTimes(forecast);
-        this._sunPosition = null;
-        if (sunTimes) {
-            const now = GLib.DateTime.new_now_local();
-            this._sunPosition = sunArcPosition(now.get_hour() * 60 + now.get_minute(), sunTimes);
-            this._sunriseLabel.text = formatClock(sunTimes.sunrise);
-            this._sunsetLabel.text = formatClock(sunTimes.sunset);
+        // ---- 天空：太阳弧线 + 月亮弧线 ----
+        // 两组数据都来自同一个每日预报响应的 astro，不额外发请求
+        this._astro = parseAstro(forecast);
+        const nowMinutes = (() => {
+            const n = GLib.DateTime.new_now_local();
+            return n.get_hour() * 60 + n.get_minute();
+        })();
+        this._sunPosition = this._astro ? sunArcPosition(nowMinutes, this._astro) : null;
+        this._moonPosition = this._astro?.moon
+            ? moonArcPosition(nowMinutes, this._astro.moon) : null;
+
+        if (this._astro) {
+            this._sunriseLabel.text = formatClock(this._astro.sunrise);
+            this._sunsetLabel.text = formatClock(this._astro.sunset);
         }
         if (this._sunArcItem) {
-            this._sunArcItem.visible = sunTimes !== null;
-            if (sunTimes)
+            this._sunArcItem.visible = this._astro !== null;
+            if (this._astro)
                 this._sunArcArea.queue_repaint();
         }
 
-        // ---- 10 天趋势折线（收在子菜单里）----
+        const moon = this._astro?.moon ?? null;
+        if (this._moonArcItem) {
+            this._moonArcItem.visible = moon !== null;
+            if (moon) {
+                this._moonriseLabel.text = formatClock(moon.moonrise);
+                // 月落跨过午夜时补了 24 小时，显示要取回当天的时刻
+                this._moonsetLabel.text = formatClock(moon.moonset % (24 * 60));
+                this._moonPhaseLabel.text = moon.phase?.name ?? '';
+                this._moonArcArea.queue_repaint();
+            }
+        }
+
+        // ---- 10 天趋势折线 + 逐日月相（收在子菜单里）----
         this._trendPoints = parseTrendPoints(forecast);
+        this._moonPhases = parseMoonPhases(forecast);
         const showTrend = this._trendPoints.length >= 2;
         if (this._trendItem) {
             this._trendItem.visible = showTrend;
-            if (showTrend)
+            if (showTrend) {
                 this._trendArea.queue_repaint();
+                this._trendMoonArea.queue_repaint();
+            }
         }
 
         if (forecast && Array.isArray(forecast) && forecast.length > 0) {
@@ -2223,11 +2669,16 @@ export default class ClimaCNExtension extends Extension {
         if (this._aqiGroup)
             this._aqiGroup.visible = false;
 
-        // 日出日落与趋势同样基于失效的数据，一并隐藏
+        // 天文弧线、月相与趋势同样基于失效的数据，一并隐藏
         this._sunPosition = null;
+        this._astro = null;
+        this._moonPosition = null;
         if (this._sunArcItem)
             this._sunArcItem.visible = false;
+        if (this._moonArcItem)
+            this._moonArcItem.visible = false;
         this._trendPoints = [];
+        this._moonPhases = [];
         if (this._trendItem)
             this._trendItem.visible = false;
 
