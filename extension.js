@@ -959,6 +959,8 @@ export default class ClimaCNExtension extends Extension {
         this._searchEntry = null;
         this._searchStatusLabel?.destroy();
         this._searchStatusLabel = null;
+        this._searchStatusItem?.destroy();
+        this._searchStatusItem = null;
         this._searchResultsSection?.destroy();
         this._searchResultsSection = null;
 
@@ -1420,8 +1422,11 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _buildSearchUI() {
+        /* 这里刻意不设 hint_text。St.Entry 的提示只在 text 为空时隐藏，
+         * 而输入法预编辑期间 text 仍然是空的——提示不会让位，拼音会和它
+         * 叠在同一位置。所以把说明文字整行搬到输入框外面去，
+         * 位置固定，无论输入法处于什么状态都不可能重叠。 */
         this._searchEntry = new St.Entry({
-            hint_text: _('搜索城市 (例: 北京/海淀/朝阳)...'),
             track_hover: true,
             can_focus: true,
             style_class: 'climacn-search-entry'
@@ -1429,7 +1434,11 @@ export default class ClimaCNExtension extends Extension {
         this._searchActivateId = this._searchEntry.clutter_text.connect('activate', () => this._onSearchActivate());
         this._searchTextChangedId = this._searchEntry.clutter_text.connect('text-changed', () => this._onSearchTextChanged());
 
+        /* 搜索区这两行不是可点的菜单动作，加个类让 CSS 去掉菜单项的
+         * 悬停/选中底色——否则整行会糊上一大块灰，把输入框衬得很难看。
+         * PopupBaseMenuItem 会忽略构造参数里的 style_class，只能事后加。 */
         const entryItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        entryItem.add_style_class_name('climacn-search-row');
         entryItem.add_child(this._searchEntry);
         this._indicator.menu.addMenuItem(entryItem);
 
@@ -1437,14 +1446,25 @@ export default class ClimaCNExtension extends Extension {
         this._searchStatusLabel = new St.Label({
             style_class: 'climacn-search-status'
         });
-        this._searchStatusLabel.hide();
-        const statusItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
-        statusItem.add_child(this._searchStatusLabel);
-        this._indicator.menu.addMenuItem(statusItem);
+        this._searchStatusItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        this._searchStatusItem.add_style_class_name('climacn-search-row');
+        this._searchStatusItem.add_style_class_name('climacn-search-status-row');
+        this._searchStatusItem.add_child(this._searchStatusLabel);
+        this._searchStatusItem.visible = false;
+        this._indicator.menu.addMenuItem(this._searchStatusItem);
 
         this._searchResultsSection = new PopupMenu.PopupMenuSection();
         this._indicator.menu.addMenuItem(this._searchResultsSection);
         this._searchResultsSection.actor.hide();
+        this._updateSearchHint();
+    }
+
+    /* 输入框为空时，在下面一行给出用法示例。
+     * 输入框自己不放提示文字（原因见 _buildSearchUI），这里就是它唯一的说明。 */
+    _updateSearchHint() {
+        if (!this._searchEntry || this._searchEntry.text.trim())
+            return;
+        this._showSearchStatus(_('搜索城市，例：北京 / 海淀 / 朝阳'));
     }
 
     _loadCityData() {
@@ -1564,7 +1584,8 @@ export default class ClimaCNExtension extends Extension {
             this._showSearchStatus(_('未找到相关城市'));
             return;
         }
-        this._searchStatusLabel.hide();
+        // 有结果时状态行让位给结果列表，整行隐藏
+        this._clearSearchStatus();
         this._searchResultsSection.actor.show();
         for (const city of results) {
             let display = city.name;
@@ -1577,10 +1598,19 @@ export default class ClimaCNExtension extends Extension {
         }
     }
 
+    /* 显隐控制整行而不是那个标签。之前只 hide 标签，空菜单项仍旧留在菜单里
+     * 占着高度、还会响应悬停变出一条灰色横杠。 */
     _showSearchStatus(text) {
-        this._searchResultsSection.actor.hide();
+        this._searchResultsSection?.actor.hide();
+        if (!this._searchStatusLabel || !this._searchStatusItem)
+            return;
         this._searchStatusLabel.text = text;
-        this._searchStatusLabel.show();
+        this._searchStatusItem.visible = true;
+    }
+
+    _clearSearchStatus() {
+        if (this._searchStatusItem)
+            this._searchStatusItem.visible = false;
     }
 
     _clearSearchResults() {
@@ -1588,9 +1618,8 @@ export default class ClimaCNExtension extends Extension {
             this._searchResultsSection.removeAll();
             this._searchResultsSection.actor.hide();
         }
-        if (this._searchStatusLabel) {
-            this._searchStatusLabel.hide();
-        }
+        this._clearSearchStatus();
+        this._updateSearchHint();
     }
 
     _selectCity(city) {

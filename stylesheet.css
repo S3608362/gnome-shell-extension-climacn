@@ -132,12 +132,31 @@
 /* ---------------------------------------------------------------------
  * 城市搜索框样式
  * --------------------------------------------------------------------- */
+/* 搜索区的两行都不是可点的菜单动作，去掉菜单项在悬停/选中时的底色。
+ * Shell 主题给 .popup-menu-item:active 加了灰色背景，用在输入框上会糊成
+ * 一大块灰，把输入框衬得很难看。同权重下后加载的样式生效，所以能覆盖。 */
+.climacn-search-row,
+.climacn-search-row:hover,
+.climacn-search-row:active,
+.climacn-search-row:active:hover,
+.climacn-search-row:focus {
+  background-color: transparent;
+  box-shadow: none;
+}
+
 .climacn-search-entry {
   padding: 6px 12px;
   font-size: 0.9em;
-  border-radius: 8px;
+  /* 与菜单项的圆角一致，之前是 8px，和周围对不上 */
+  border-radius: 12px;
   /* 与上方各内容区保持同一个水平内边距 */
-  margin: 4px 12px;
+  margin: 0px 12px;
+}
+
+/* 说明/状态行：只有一行小字，不需要菜单项那么高的内边距，
+ * 也别为它多占高度。左内边距与其它内容区对齐 */
+.climacn-search-status-row {
+  padding: 0px 12px 4px 12px;
 }
 
 /* 搜索状态提示（“未找到相关城市”等），不能复用带固定宽度的 detail-label */
