@@ -29,6 +29,13 @@ const AQI_FONT_PX = 10;                   // 色环中心数值的字号（逻�
 const AQI_MAX_FAILURES = 2;               // 连续失败几次后不再请求空气质量
 const FORECAST_DAYS = 10;                 // 和风每日预报上限即 10 天，趋势折线用它
 const FORECAST_ROWS = 3;                  // 逐日行只展开前 3 天
+
+/* 日历菜单卡片显示几天。取 4 而不是官方那排的 5：官方每列只放一个温度
+ * （「15时」约 35px + 「22°」约 24px），5 列自然宽约 223px；本卡片放的是
+ * 「26°/18°」双温，每列约 45px，5 列会到 273px，把整个日历弹窗撑宽。
+ * 4 列约 216px，落在同一区间内。 */
+const CALENDAR_COLS = 4;
+
 const SUN_ARC_HEIGHT = 60;                // 天空弧线的高度（逻辑像素，弧线上还要留出刻度）
 const MOON_ARC_HEIGHT = 56;               // 月亮弧线的高度
 const MOON_DISC_RADIUS = 7;               // 弧上月相圆盘的半径（逻辑像素）
@@ -907,6 +914,14 @@ export default class ClimaCNExtension extends Extension {
         this._trendRepaintId = 0;
         this._trendMoonRepaintId = 0;
         this._refreshActivateId = 0;
+        /* 日历菜单卡片。它挂在 Shell 的 actor 树上（displaysBox），
+         * 不在 _indicator 的子树里，所以 _indicator.destroy() 带不走它，
+         * 必须在 _destroyUI() 里单独摘除。 */
+        this._calendarClickedId = 0;
+        this._showInCalendarId = 0;
+        this._calendarCard = null;
+        this._calendarGrid = null;
+        this._calendarCityLabel = null;
         this._session = new Soup.Session();
         this._cancellable = new Gio.Cancellable();
 
@@ -939,6 +954,10 @@ export default class ClimaCNExtension extends Extension {
         this._moonPosition = null;
         this._trendPoints = [];
         this._moonPhases = [];
+        /* 最近一次成功的逐日预报。日历菜单卡片是推式渲染的旁观者，
+         * 用户在首选项里中途打开卡片时没有数据可推，靠它立即补上，
+         * 不必为此多发一次请求。 */
+        this._lastForecast = null;
         // 本次数据实际来自哪些源，由 _applyPlan 按计划拼好供归因行显示
         this._attributionText = '';
         // 本轮是否已经报过错，避免通用文案盖掉具体原因
@@ -990,6 +1009,11 @@ export default class ClimaCNExtension extends Extension {
             if (name === this._currentCityName) return;
             this._currentCityName = name;
             if (this._cityLabel) this._cityLabel.text = name;
+            if (this._calendarCityLabel) {
+                const short = this._shortCityName(name);
+                this._calendarCityLabel.text = short;
+                this._calendarCard.accessible_name = `${_('天气')} ${short}`;
+            }
         });
 
         /* 数据源按类别切换会改变抓取计划，与改凭据同类，走同一个防抖：
@@ -999,6 +1023,17 @@ export default class ClimaCNExtension extends Extension {
         this._sourceForecastId = this._settings.connect('changed::source-forecast', onSourceChanged);
         this._sourceAirQualityId = this._settings.connect('changed::source-air-quality', onSourceChanged);
         this._sourceAstronomyId = this._settings.connect('changed::source-astronomy', onSourceChanged);
+
+        /* 卡片开关即时生效，不必重载扩展。关掉时整张摘除不留空壳；
+         * 重新打开走 _buildCalendarSection()，它末尾会拿 _lastForecast
+         * 立即填上，不用为这张卡多发一次请求。 */
+        this._showInCalendarId = this._settings.connect('changed::show-in-calendar', () => {
+            if (!this._enabled) return;
+            if (this._settings.get_boolean('show-in-calendar'))
+                this._buildCalendarSection();
+            else
+                this._destroyCalendarSection();
+        });
 
         // 调试日志默认关闭，开启状态跟随设置实时变化，无需重载扩展
         this._debugLoggingId = this._settings.connect('changed::debug-logging', () => {
@@ -1011,6 +1046,9 @@ export default class ClimaCNExtension extends Extension {
         this._theme.load_stylesheet(Gio.File.new_for_path(this._stylesheetPath));
 
         this._createIndicator();
+        /* 必须早于 _fetchWeather()：凭据不全时它会同步调用 _showError()
+         * 再返回，晚于它就会出现一轮「卡片还不存在却要按错误态更新」。 */
+        this._buildCalendarSection();
         this._initPowerMonitor();
         this._fetchWeather();
         this._startAutoRefresh();
@@ -1129,6 +1167,11 @@ export default class ClimaCNExtension extends Extension {
                 this._settings.disconnect(this._cityNameChangedId);
                 this._cityNameChangedId = 0;
             }
+            // 设置对象的寿命长于 _destroyUI()，这一项不能放进那边
+            if (this._showInCalendarId) {
+                this._settings.disconnect(this._showInCalendarId);
+                this._showInCalendarId = 0;
+            }
             this._settings = null;
         }
 
@@ -1159,6 +1202,7 @@ export default class ClimaCNExtension extends Extension {
         this._moonPosition = null;
         this._trendPoints = [];
         this._moonPhases = [];
+        this._lastForecast = null;
         this._attributionText = '';
         this._errorShown = false;
         this._lastFetchAt = 0;
@@ -1213,6 +1257,11 @@ export default class ClimaCNExtension extends Extension {
             this._refreshItem?.disconnect(this._refreshActivateId);
             this._refreshActivateId = 0;
         }
+
+        /* 摘掉日历菜单里的卡片。必须在这一步处理：它不在 _indicator 的子树里，
+         * _indicator.destroy() 带不走它，而它的点击回调又引用了 _indicator，
+         * 所以要赶在那边销毁之前断干净。 */
+        this._destroyCalendarSection();
 
         // 2. 销毁对象并清空引用
         this._sunriseLabel?.destroy();
@@ -1331,6 +1380,223 @@ export default class ClimaCNExtension extends Extension {
         this._indicator.menu.box.add_style_class_name('climacn-menu');
         this._buildMenu();
         Main.panel.addToStatusArea('climacn', this._indicator);
+    }
+
+    /* ------------------------------------------------------------------
+     * 日历菜单卡片
+     *
+     * 官方那张天气卡（dateMenu.js 的 WeatherSection）数据走 D-Bus 从
+     * org.gnome.Weather 应用取，总线名写死在它那边，没法把本扩展的数据
+     * 灌进去；能做的只是在同一排加一张并列的卡。
+     *
+     * 宿主节点和下面用到的类名都是 Shell 的私有结构，没有公开接口。
+     * 取不到就静默退出——这个函数每次开机都会跑一遍，为一条拿不到的东西
+     * 反复刷日志只是噪音。
+     *
+     * 样式全部沿用主题里那套 weather-* 类名，扩展自己不写一行 CSS：
+     * 主题里这些规则都是挂在 .weather-button 下的后代选择器，圆角、内边距、
+     * 悬停/按下/焦点态、明暗与高对比主题的配色都能直接拿到。
+     * ------------------------------------------------------------------ */
+
+    _buildCalendarSection() {
+        if (this._calendarCard) return;
+        if (!this._settings.get_boolean('show-in-calendar')) return;
+
+        /* 优先取官方天气卡的父节点，那正是 Shell 追加 WeatherSection 的容器；
+         * 退回 ScrollView 的 child 作后备。 */
+        let host = null;
+        try {
+            const dm = Main.panel.statusArea?.dateMenu;
+            host = dm?._weatherItem?.get_parent() ?? dm?._displaysSection?.child ?? null;
+        } catch (_e) {
+            host = null;   // 静默：拿不到就不显示卡片，不刷日志
+        }
+        if (!host || typeof host.add_child !== 'function')
+            return;
+
+        /* 上一次 disable 若没走完，可能留下同名残留。按 name 判断而不是按
+         * style_class——后者会匹配到官方那张 weather-button。 */
+        for (const child of host.get_children()) {
+            if (child.name === 'climacn-calendar-card')
+                child.destroy();
+        }
+
+        const card = new St.Button({
+            style_class: 'weather-button',
+            can_focus: true,
+            x_expand: true,
+            name: 'climacn-calendar-card'
+        });
+
+        const box = new St.BoxLayout({
+            style_class: 'weather-box',
+            orientation: Clutter.Orientation.VERTICAL,
+            x_expand: true
+        });
+        card.child = box;
+
+        const titleBox = new St.BoxLayout({ style_class: 'weather-header-box' });
+        const titleLabel = new St.Label({
+            text: _('天气'),
+            style_class: 'weather-header',
+            x_align: Clutter.ActorAlign.START,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.END
+        });
+        titleBox.add_child(titleLabel);
+
+        this._calendarCityLabel = new St.Label({
+            text: this._shortCityName(this._currentCityName),
+            style_class: 'weather-header location',
+            x_align: Clutter.ActorAlign.END,
+            y_align: Clutter.ActorAlign.END
+        });
+        titleBox.add_child(this._calendarCityLabel);
+        box.add_child(titleBox);
+
+        const layout = new Clutter.GridLayout({ orientation: Clutter.Orientation.VERTICAL });
+        this._calendarGrid = new St.Widget({
+            style_class: 'weather-grid',
+            layout_manager: layout
+        });
+        // 只在创建时调一次：它把 CSS 里的 spacing-rows / spacing-columns 接到布局上
+        layout.hookup_style(this._calendarGrid);
+        box.add_child(this._calendarGrid);
+
+        // 可访问名跟随标题；不设的话读屏只会念出一个没有名字的按钮
+        card.labelActor = titleLabel;
+        card.accessible_name = `${_('天气')} ${this._shortCityName(this._currentCityName)}`;
+
+        this._calendarClickedId = card.connect('clicked', () => this._activateFromCalendar());
+
+        this._calendarCard = card;
+        host.add_child(card);
+
+        this._updateCalendarSection(this._lastForecast);
+    }
+
+    /* 点卡片打开本扩展自己的弹窗。先把日历菜单关掉：PopupMenuManager 在
+     * 打开新菜单时本就会去关上一个，先关能让它走「没有旧菜单」那条简单分支，
+     * 否则两个菜单会同时做动画。 */
+    _activateFromCalendar() {
+        Main.overview.hide();
+        Main.panel.closeCalendar();
+        this._indicator?.menu.toggle();
+    }
+
+    /* 城市名形如「北京，北京市」，卡片上位置窄，只取逗号前那段 */
+    _shortCityName(name) {
+        const s = String(name ?? '');
+        const i = s.indexOf('，');
+        return i > 0 ? s.slice(0, i) : s;
+    }
+
+    /* 卡片上的日名。不沿用 _updateUI 里那个 ['今天','明天','后天']——它只有
+     * 三项且按列号索引，第 4 列会取到 undefined。也不解析接口返回的日期串：
+     * new Date('YYYY-MM-DD') 按 UTC 解释，负时区会整体串一天。 */
+    _calendarDayName(today, offset) {
+        if (offset === 0) return _('今天');
+        if (offset === 1) return _('明天');
+        /* get_day_of_week(): 1=周一 … 7=周日（GJS 里没有 get_weekday()）。
+         * 对 7 取模正好让周日落到下标 0。 */
+        const names = [_('周日'), _('周一'), _('周二'), _('周三'),
+                       _('周四'), _('周五'), _('周六')];
+        return names[today.add_days(offset).get_day_of_week() % 7];
+    }
+
+    /* 重建卡片里的预报网格。每次刷新整体重建，与官方 WeatherSection 一致
+     * （它也是 destroy_all_children() 之后重新 attach）。
+     *
+     * 所有提前返回都必须排在第一个 new 之前：这个函数每轮刷新都会跑，
+     * 半途返回会把已经建好却没挂上去的 actor 泄漏在 Shell 进程里。
+     * 同理不保留任何单元格引用——它们下一轮就被销毁，留着只会是悬空包装。 */
+    _updateCalendarSection(forecast) {
+        if (!this._calendarGrid) return;
+
+        this._calendarGrid.destroy_all_children();
+
+        const layout = this._calendarGrid.layout_manager;
+        const days = Array.isArray(forecast) ? forecast.slice(0, CALENDAR_COLS) : [];
+
+        if (days.length === 0) {
+            layout.attach(new St.Label({ text: _('暂无预报数据') }), 0, 0, 1, 1);
+            return;
+        }
+
+        const today = GLib.DateTime.new_now_local();
+
+        for (let i = 0; i < CALENDAR_COLS; i++) {
+            const day = days[i] ?? null;
+
+            const nameLabel = new St.Label({
+                text: day ? this._calendarDayName(today, i) : '--',
+                style_class: 'weather-forecast-time',
+                x_align: Clutter.ActorAlign.CENTER
+            });
+            /* 官方源码同样显式关掉省略号。窄列里「18°/26°」会被缩成「18…」，
+             * 那就把这张卡唯一的信息量抹掉了。 */
+            nameLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+
+            const icon = new St.Icon({
+                style_class: 'weather-forecast-icon',
+                x_align: Clutter.ActorAlign.CENTER,
+                x_expand: true
+            });
+            if (day) {
+                this._applyIcon(icon, this._createFileIcon(
+                    `${this.path}/icons/${safeIconCode(day.daytime?.condition?.code)}-symbolic.svg`));
+            } else {
+                /* 预报天数不足时留下的空列。用中性云朵而不是出错图标：
+                 * _applyIcon 的默认回退是 weather-severe-alert-symbolic，
+                 * 挂在这里会让人以为那天的数据出了问题。 */
+                this._applyIcon(icon, null, 'weather-few-clouds-symbolic');
+            }
+
+            // roundTemp 对取不到的值返回 '--°'，缺数据时天然就是占位
+            const tempLabel = new St.Label({
+                text: `${roundTemp(day?.temperatureMin?.value)}/${roundTemp(day?.temperatureMax?.value)}`,
+                style_class: 'weather-forecast-temp',
+                x_align: Clutter.ActorAlign.CENTER
+            });
+            tempLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+
+            // 每列都挂满三行，缺数据的那天留占位——跳过会打乱后面各列的对齐
+            layout.attach(nameLabel, i, 0, 1, 1);
+            layout.attach(icon, i, 1, 1, 1);
+            layout.attach(tempLabel, i, 2, 1, 1);
+        }
+    }
+
+    /* 幂等：首选项开关、_destroyUI() 都会走到这里 */
+    _destroyCalendarSection() {
+        if (this._calendarClickedId) {
+            this._calendarCard?.disconnect(this._calendarClickedId);
+            this._calendarClickedId = 0;
+        }
+
+        /* 网格与城市名标签其实会随卡片一起销毁，这里仍各自显式 destroy() 一次：
+         * EGO 的静态检查要求每个在 enable() 路径上创建的对象都有对应的
+         * destroy() 调用，只置 null 不算。先销毁子节点再销毁父节点是安全的，
+         * Clutter 会把已销毁的孩子从父节点的子列表里摘掉。 */
+        this._calendarGrid?.destroy();
+        this._calendarGrid = null;
+        this._calendarCityLabel?.destroy();
+        this._calendarCityLabel = null;
+
+        /* 卡片本身放在最后，且先置空再销毁：万一它已被 Shell 连带释放，
+         * 字段里留着的就是一个已析构对象的包装，再碰它（包括 destroy()）
+         * 都会抛。置空之后，即使下面抛了，后续调用也只会看到 null。 */
+        const card = this._calendarCard;
+        this._calendarCard = null;
+
+        /* 只 destroy()，不要先 remove_child——Clutter.Actor.destroy() 自己会
+         * 从父节点摘除。也绝不能用 remove_all_children()：宿主容器里还放着
+         * Shell 自己的事件卡与世界时钟卡，那样会一并清掉。 */
+        try {
+            card?.destroy();
+        } catch (e) {
+            logError(`Failed to destroy calendar card: ${e}`);
+        }
     }
 
     _buildMenu() {
@@ -3150,6 +3416,11 @@ export default class ClimaCNExtension extends Extension {
             this._forecastRowsBox.add_child(noDataLabel);
             this._forecastContainer.show();
         }
+
+        /* 日历菜单里的卡片。放在上面那个 if/else 之外：预报取不到时它要跟着
+         * 切到占位态，而不是把上一轮的数据一直挂在日历里。 */
+        this._lastForecast = Array.isArray(forecast) ? forecast : null;
+        this._updateCalendarSection(this._lastForecast);
     }
 
     /* 顶栏出错时显示哪个图标。以前一律用通用错误框，用户看不出该去
@@ -3214,5 +3485,10 @@ export default class ClimaCNExtension extends Extension {
             });
             this._forecastRowsBox.add_child(errLabel);
         }
+
+        /* 日历菜单里的卡片同样要清空。这条路径最可能在任何一次成功抓取之前
+         * 就被走到，所以这里必须带守卫，不能用 _updateUI 那种直接赋值的写法。 */
+        this._lastForecast = null;
+        this._updateCalendarSection(null);
     }
 }
