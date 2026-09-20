@@ -111,6 +111,18 @@
         暮光分段，但月亮部分更精确。</description>
     </key>
 
+    <!-- 是否在日历菜单里显示天气卡片 -->
+    <key name="show-in-calendar" type="b">
+      <default>false</default>
+      <summary>在日历菜单里显示天气卡片</summary>
+      <description>默认关闭。开启后，点顶栏时钟弹出的日历菜单右侧会多出一张与
+        「事件」「世界时钟」并列的天气卡片，显示当前天气与未来数日预报。
+        与顶栏指示器互不影响，两处显示的是同一份数据，也不会因此增加请求次数。
+        默认关闭的原因：该卡片依赖 GNOME Shell 日历菜单的内部结构，没有公开
+        接口，不同版本之间可能失效。取不到宿主节点时卡片会静默隐藏，
+        扩展其余部分不受影响。</description>
+    </key>
+
     <!-- 调试日志开关 -->
     <key name="debug-logging" type="b">
       <default>false</default>

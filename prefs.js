@@ -124,6 +124,21 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
         for (const spec of SOURCE_ROWS)
             addSourceRow(settings, sourcePickGroup, spec);
 
+        // --- 显示分组 ---
+        const displayGroup = new Adw.PreferencesGroup({ title: '显示' });
+        page.add(displayGroup);
+
+        const calendarRow = new Adw.SwitchRow({
+            title: '在日历菜单里显示天气',
+            subtitle: '点顶栏时钟弹出的面板右侧，会多出一张与「事件」「世界时钟」并列的' +
+                '天气卡片。与顶栏图标互不影响，两处用的是同一份数据，不会增加请求次数。' +
+                '该卡片依赖 GNOME Shell 的内部结构，若某个版本不再兼容，卡片会自行隐藏，' +
+                '扩展其余部分不受影响。',
+        });
+        settings.bind('show-in-calendar', calendarRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        displayGroup.add(calendarRow);
+
         // --- 排查问题分组 ---
         const debugGroup = new Adw.PreferencesGroup({
             title: '排查问题',
