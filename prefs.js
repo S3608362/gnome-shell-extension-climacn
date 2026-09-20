@@ -1,12 +1,84 @@
 // prefs.js
 import Adw from 'gi://Adw';
 import Gio from 'gi://Gio';
+import Gtk from 'gi://Gtk';
 
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
+
+/* 数据源下拉的可选值与顺序。存进 GSettings 的是这里的字符串，
+ * 不是下标——下标会随后续增删选项而错位。 */
+const SOURCE_VALUES = ['auto', 'qweather', 'openmeteo'];
+const SOURCE_LABELS = ['自动', '和风天气', 'Open-Meteo'];
+
+/* 四个类别。subtitle 写清各自的取舍，用户不必去查文档才知道该选哪个。 */
+const SOURCE_ROWS = [
+    {
+        key: 'source-current',
+        title: '实时天气',
+        subtitle: '自动：填了和风凭据就用和风，否则用 Open-Meteo（会把城市经纬度发给它）。',
+    },
+    {
+        key: 'source-forecast',
+        title: '逐日预报',
+        subtitle: '和风提供 10 天，Open-Meteo 提供 16 天。',
+    },
+    {
+        key: 'source-air-quality',
+        title: '空气质量',
+        subtitle: '和风直接返回指数；Open-Meteo 只给六项污染物浓度，由扩展按中国国标（HJ 633）' +
+            '自行计算，因此是计算值，与官方发布口径可能有偏差。',
+    },
+    {
+        key: 'source-astronomy',
+        title: '天文（日出日落 · 月相 · 曙暮光）',
+        subtitle: '两者差异最大：和风有天文/航海/民用三段曙暮光；Open-Meteo 没有曙暮光，' +
+            '但月相是连续的照亮比例而非八相名称，圆盘画得更准。',
+    },
+];
+
+const SETTINGS_VERSION = 1;
+
+/* 一次性迁移。旧版本只有一个布尔开关「启用 Open-Meteo 兜底」，默认关闭；
+ * 它被四个下拉取代，但**不能把旧默认当成 auto**——那会让从没同意过
+ * 第三方请求的用户，在不知情的情况下开始把城市坐标发给 Open-Meteo。
+ *
+ * 用 get_user_value 而不是 get_boolean：前者在用户从未改过时返回 null，
+ * 后者会返回 schema 默认值，两者区分不开「显式关掉」和「从没设过」。
+ * 迁移只跑一次，靠 settings-version 记，否则用户之后的下拉选择会被覆盖。 */
+function migrateSettings(settings) {
+    if (settings.get_int('settings-version') >= SETTINGS_VERSION)
+        return;
+
+    const legacy = settings.get_user_value('use-open-meteo-fallback');
+    const target = legacy && legacy.get_boolean() ? 'auto' : 'qweather';
+    for (const { key } of SOURCE_ROWS)
+        settings.set_string(key, target);
+
+    settings.set_int('settings-version', SETTINGS_VERSION);
+}
+
+function addSourceRow(settings, group, { key, title, subtitle }) {
+    const row = new Adw.ComboRow({
+        title,
+        subtitle,
+        model: Gtk.StringList.new(SOURCE_LABELS),
+    });
+    // 与上面两个 EntryRow 一样走手动同步：GSettings 存的是字符串，
+    // 而下拉给的是下标，绑定不能直接用
+    const current = SOURCE_VALUES.indexOf(settings.get_string(key));
+    row.selected = current >= 0 ? current : 0;
+    row.connect('notify::selected', (widget) => {
+        const value = SOURCE_VALUES[widget.selected];
+        if (value && settings.get_string(key) !== value)
+            settings.set_string(key, value);
+    });
+    group.add(row);
+}
 
 export default class ClimaCNPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
+        migrateSettings(settings);
 
         const page = new Adw.PreferencesPage({
             title: 'ClimaCN 设置',
@@ -39,20 +111,18 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
         });
         apiGroup.add(apiHostRow);
 
-        // --- 备用数据源分组 ---
-        const fallbackGroup = new Adw.PreferencesGroup({
-            title: '备用数据源',
-            description: '和风天气不可用时（未填凭据，或当日请求额度用尽），可自动改用 Open-Meteo 获取数据，避免界面空白。',
+        // --- 数据源分组 ---
+        // 四类内容各自选源：两个源各有长短，一个总开关没法取长补短
+        const sourcePickGroup = new Adw.PreferencesGroup({
+            title: '数据源',
+            description: '四类内容可以分别选择来源。选「自动」时，填了和风凭据就用和风，' +
+                '否则改用 Open-Meteo。Open-Meteo 是第三方免费服务，无需注册，' +
+                '用它时扩展会把所选城市的经纬度发送过去。',
         });
-        page.add(fallbackGroup);
+        page.add(sourcePickGroup);
 
-        const fallbackRow = new Adw.SwitchRow({
-            title: '启用 Open-Meteo 兜底',
-            subtitle: 'Open-Meteo 是第三方免费服务，无需注册。开启后扩展会把所选城市的经纬度发送给它。',
-        });
-        settings.bind('use-open-meteo-fallback', fallbackRow, 'active',
-            Gio.SettingsBindFlags.DEFAULT);
-        fallbackGroup.add(fallbackRow);
+        for (const spec of SOURCE_ROWS)
+            addSourceRow(settings, sourcePickGroup, spec);
 
         // --- 排查问题分组 ---
         const debugGroup = new Adw.PreferencesGroup({
@@ -79,13 +149,16 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
         page.add(infoGroup);
 
         // --- 数据来源分组 ---
-        // 和风天气条款要求数据归因与数据共同显示：菜单里保留一行“和风天气”，
+        // 和风天气条款要求数据归因与数据共同显示：菜单里保留一行来源，
         // 完整的说明与链接集中放在这里
         const sourceGroup = new Adw.PreferencesGroup({
             title: '数据来源',
-            description: '天气数据默认由和风天气（QWeather）提供\n' +
+            description: '和风天气（QWeather）\n' +
                 '归因说明：https://developer.qweather.com/attribution.html\n' +
-                '启用备用数据源时，数据改由 Open-Meteo（https://open-meteo.com/）提供\n' +
+                'Open-Meteo（https://open-meteo.com/）：免 Key 的第三方服务，' +
+                '其预报数据来自各国气象机构的开放数据\n' +
+                '空气质量选 Open-Meteo 时，指数由扩展按中国国标 HJ 633 从六项污染物浓度计算得出，' +
+                '非官方发布值\n' +
                 '天气图标来源于和风天气图标库（https://icons.qweather.com/），采用 CC BY 4.0 许可',
         });
         page.add(sourceGroup);

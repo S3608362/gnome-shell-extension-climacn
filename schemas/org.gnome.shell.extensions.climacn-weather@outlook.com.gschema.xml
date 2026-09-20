@@ -52,13 +52,63 @@
       <description>记录 daily-request-count 是哪一天的计数，日期变化时归零。</description>
     </key>
 
-    <!-- Open-Meteo 兜底开关 -->
+    <!-- 已废弃：由下面四个 source-* 键取代。
+         保留它只为让首选项能做一次性迁移——键一旦从 schema 里删掉，
+         get_user_value() 就再也读不到老用户当初的选择，而那个选择的
+         默认值是「不发第三方请求」，不能当成「随便发」。
+         等确认老用户都已升级后可以在下个大版本移除。 -->
     <key name="use-open-meteo-fallback" type="b">
       <default>false</default>
-      <summary>和风天气不可用时降级到 Open-Meteo</summary>
-      <description>开启后，未配置和风凭据或当日请求额度用尽时，改用 Open-Meteo
-        获取数据，避免界面空白。Open-Meteo 是第三方服务，开启后扩展会把所选
-        城市的经纬度发送给它；默认关闭。</description>
+      <summary>（已废弃）启用 Open-Meteo 兜底</summary>
+      <description>已由「数据源」分组里的四个下拉取代，扩展本身不再读取此键。
+        仅用于把老用户的开关状态迁移到新键上。</description>
+    </key>
+
+    <!-- 设置结构版本号，用于只跑一次的数据迁移 -->
+    <key name="settings-version" type="i">
+      <default>0</default>
+      <summary>设置结构版本</summary>
+      <description>首选项据此判断是否需要执行数据迁移。0 表示尚未迁移过
+        （即从使用了旧布尔开关的版本升级而来）。</description>
+    </key>
+
+    <!-- ================================================================
+         数据源选择：四类内容各自独立
+         取值 auto（和风可用就用和风，否则 Open-Meteo）、qweather、openmeteo。
+         之所以分成四类，是因为两个源各有长短：和风有三段曙暮光，Open-Meteo
+         的月相是连续照亮比例、逐日预报多到 16 天、且无需凭据。
+         ================================================================ -->
+
+    <key name="source-current" type="s">
+      <default>'auto'</default>
+      <summary>实时天气的数据源</summary>
+      <description>取值 auto / qweather / openmeteo。auto 表示和风已配置且当日
+        额度未用尽时用和风，否则用 Open-Meteo。Open-Meteo 是第三方免费服务，
+        选它（或选 auto 而和风不可用）时，扩展会把所选城市的经纬度发送给它。</description>
+    </key>
+
+    <key name="source-forecast" type="s">
+      <default>'auto'</default>
+      <summary>逐日预报的数据源</summary>
+      <description>取值 auto / qweather / openmeteo。和风提供 10 天，Open-Meteo
+        提供 16 天。同样地，选 Open-Meteo 时会把城市经纬度发送给该第三方服务。</description>
+    </key>
+
+    <key name="source-air-quality" type="s">
+      <default>'auto'</default>
+      <summary>空气质量的数据源</summary>
+      <description>取值 auto / qweather / openmeteo。和风直接返回空气质量指数；
+        Open-Meteo 提供六项污染物浓度，由扩展按中国国标（HJ 633）自行计算，
+        因此数值是计算值，与官方发布口径可能存在偏差。</description>
+    </key>
+
+    <key name="source-astronomy" type="s">
+      <default>'auto'</default>
+      <summary>天文数据（日出日落 · 月相 · 曙暮光）的数据源</summary>
+      <description>取值 auto / qweather / openmeteo。两者差异最大的一项：和风
+        提供天文/航海/民用三段曙暮光，Open-Meteo 没有曙暮光，但月相是连续的
+        照亮比例而非八相名称，圆盘画得更准。选 Open-Meteo 时天文弧线会少掉
+        暮光分段，但月亮部分更精确。</description>
     </key>
 
     <!-- 调试日志开关 -->

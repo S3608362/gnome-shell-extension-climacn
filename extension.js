@@ -72,6 +72,37 @@ const TEMP_RAMP = [
 ];
 
 const OPEN_METEO_HOST = 'https://api.open-meteo.com';
+const OPEN_METEO_AQI_HOST = 'https://air-quality-api.open-meteo.com';
+/* Open-Meteo 免费给到 16 天，比和风的 10 天多，没必要跟着和风砍 */
+const OPEN_METEO_FORECAST_DAYS = 16;
+
+/* =====================================================================
+ * 设置迁移
+ *
+ * 旧版本只有一个布尔开关 use-open-meteo-fallback（默认关闭），现在被四个
+ * source-* 下拉取代。**不能把旧默认当成 auto** —— 那等于让从没同意过
+ * 第三方请求的用户，在升级后不知情地开始把城市坐标发给 Open-Meteo。
+ *
+ * 用 get_user_value 而不是 get_boolean：前者在用户从未改过时返回 null，
+ * 后者会返回 schema 默认值，两者区分不开「显式关掉」和「从没设过」。
+ *
+ * 首选项里有一份同样的逻辑。两边都要有：用户可能从不打开首选项，
+ * 那时只有扩展自己跑得到；也可能在扩展被禁用时打开首选项。
+ * settings-version 保证只生效一次，重复执行无副作用。
+ * ===================================================================== */
+const SOURCE_KEYS = ['source-current', 'source-forecast',
+                     'source-air-quality', 'source-astronomy'];
+const SETTINGS_VERSION = 1;
+
+function migrateSourceSettings(settings) {
+    if (settings.get_int('settings-version') >= SETTINGS_VERSION)
+        return;
+    const legacy = settings.get_user_value('use-open-meteo-fallback');
+    const target = legacy && legacy.get_boolean() ? 'auto' : 'qweather';
+    for (const key of SOURCE_KEYS)
+        settings.set_string(key, target);
+    settings.set_int('settings-version', SETTINGS_VERSION);
+}
 
 /* =====================================================================
  * 诊断日志
@@ -212,6 +243,134 @@ function aqiFillRatio(aqi) {
 }
 
 /* =====================================================================
+ * 中国国标 AQI（HJ 633-2012）
+ *
+ * 和风直接返回空气质量指数；Open-Meteo 只给六项污染物浓度，指数要自己算。
+ * 之所以自己算而不是用 Open-Meteo 的 us_aqi：同一时刻同一地点，美标实测 187
+ * 而国标约 62，切换数据源时数字会从 62 跳到 187，看上去像坏了。
+ *
+ * 注意这是**计算值**：HJ 633 要求 PM2.5/PM10/SO2/NO2/CO 取 24 小时均值、
+ * O3 取 8 小时滑动均值，而 Open-Meteo 的 current 只有约 15 分钟的瞬时值，
+ * 因此这里取末尾若干小时的逐时数据自行平均。方向正确，但与官方发布口径
+ * 仍可能有偏差，界面上不应声称等同官方数值。
+ * ===================================================================== */
+
+const AQI_LEVELS = [0, 50, 100, 150, 200, 300, 400, 500];
+
+/* 各污染物与 AQI_LEVELS 对应的浓度阈值。单位：μg/m³（CO 为 mg/m³）。
+ * O3 只到 300 档——国标未定义 8 小时滑动平均在 300 以上的分级。 */
+const AQI_BREAKPOINTS = {
+    pm25: [0, 35, 75, 115, 150, 250, 350, 500],
+    pm10: [0, 50, 150, 250, 350, 420, 500, 600],
+    so2:  [0, 50, 150, 475, 800, 1600, 2100, 2620],
+    no2:  [0, 40, 80, 180, 280, 565, 750, 940],
+    co:   [0, 2, 4, 14, 24, 36, 48, 60],
+    o3:   [0, 100, 160, 215, 265, 800],
+};
+
+const AQI_POLLUTANT_ZH = {
+    pm25: '细颗粒物（PM2.5）',
+    pm10: '可吸入颗粒物（PM10）',
+    so2: '二氧化硫',
+    no2: '二氧化氮',
+    co: '一氧化碳',
+    o3: '臭氧',
+};
+
+/* 国标六档的等级名与推荐配色 */
+const AQI_CATEGORIES = [
+    [50,  '优',       [0.00, 0.89, 0.00]],
+    [100, '良',       [1.00, 1.00, 0.00]],
+    [150, '轻度污染', [1.00, 0.49, 0.00]],
+    [200, '中度污染', [1.00, 0.00, 0.00]],
+    [300, '重度污染', [0.56, 0.25, 0.59]],
+    [Infinity, '严重污染', [0.49, 0.00, 0.14]],
+];
+
+function aqiCategory(aqi) {
+    for (const [limit, name] of AQI_CATEGORIES) {
+        if (aqi <= limit)
+            return name;
+    }
+    return AQI_CATEGORIES[AQI_CATEGORIES.length - 1][1];
+}
+
+function aqiColor(aqi) {
+    for (const [limit, , rgb] of AQI_CATEGORIES) {
+        if (aqi <= limit)
+            return { r: rgb[0] * 255, g: rgb[1] * 255, b: rgb[2] * 255 };
+    }
+    return { r: 126, g: 0, b: 36 };
+}
+
+/* 单项 IAQI：在分段表里找到浓度所在区间后线性内插 */
+function iaqiFrom(concentration, table) {
+    const c = Number(concentration);
+    if (!Number.isFinite(c) || c < 0)
+        return null;
+    for (let i = 1; i < table.length; i++) {
+        if (c <= table[i]) {
+            const lo = table[i - 1];
+            const hi = table[i];
+            const loI = AQI_LEVELS[i - 1];
+            const hiI = AQI_LEVELS[i];
+            return Math.round(loI + (hiI - loI) * (c - lo) / (hi - lo));
+        }
+    }
+    return AQI_LEVELS[table.length - 1];   // 超出表顶，按该表上限处理
+}
+
+function meanOf(values) {
+    const nums = (Array.isArray(values) ? values : [])
+        .map(Number)
+        .filter(Number.isFinite);
+    if (nums.length === 0)
+        return null;
+    return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+/* Open-Meteo 空气质量响应 → 国标 AQI。
+ * nowIso 由调用方传入，便于脱离 Shell 环境测试。 */
+function chinaAqiFromHourly(nowIso, aq) {
+    const hourly = aq?.hourly ?? {};
+    const upto = lastHourlyIndex(hourly.time, nowIso);
+    if (upto < 0)
+        return null;
+
+    // 取截止到现在的末尾 n 个样本——绝不能用未来数据算"当前"均值
+    const tail = (key, n) => {
+        const arr = hourly[key];
+        if (!Array.isArray(arr))
+            return null;
+        return arr.slice(Math.max(0, upto - n + 1), upto + 1);
+    };
+
+    const coRaw = meanOf(tail('carbon_monoxide', 24));
+    const readings = [
+        ['pm25', iaqiFrom(meanOf(tail('pm2_5', 24)), AQI_BREAKPOINTS.pm25)],
+        ['pm10', iaqiFrom(meanOf(tail('pm10', 24)), AQI_BREAKPOINTS.pm10)],
+        ['so2',  iaqiFrom(meanOf(tail('sulphur_dioxide', 24)), AQI_BREAKPOINTS.so2)],
+        ['no2',  iaqiFrom(meanOf(tail('nitrogen_dioxide', 24)), AQI_BREAKPOINTS.no2)],
+        // Open-Meteo 的 CO 单位是 μg/m³，国标分段表用的是 mg/m³
+        ['co',   iaqiFrom(coRaw === null ? null : coRaw / 1000, AQI_BREAKPOINTS.co)],
+        ['o3',   iaqiFrom(meanOf(tail('ozone', 8)), AQI_BREAKPOINTS.o3)],
+    ].filter(e => e[1] !== null);
+
+    if (readings.length === 0)
+        return null;
+
+    const [primaryKey, aqi] = readings.reduce((a, b) => (b[1] > a[1] ? b : a));
+    return {
+        aqi,
+        display: String(aqi),
+        category: aqiCategory(aqi),
+        // 国标规定 AQI ≤ 50 不报首要污染物
+        primary: aqi > 50 ? AQI_POLLUTANT_ZH[primaryKey] : '',
+        color: aqiColor(aqi),
+    };
+}
+
+/* =====================================================================
  * 气压历史与趋势
  * 和风只给当前气压，趋势要靠本地按时间采样后自行比较，
  * 采样写入 GSettings，重启 Shell 后依然可用。
@@ -315,7 +474,22 @@ function parseMoon(astro) {
         return null;
     if (moonset <= moonrise)
         moonset += 24 * 60;
-    return { moonrise, moonset, phase: MOON_PHASES[astro?.moonPhase] ?? null };
+
+    const base = MOON_PHASES[astro?.moonPhase] ?? null;
+    if (!base)
+        return { moonrise, moonset, phase: null };
+
+    /* Open-Meteo 额外给出连续的照亮比例（moonLit），比八相名的步进更准，
+     * 有就覆盖 lit；中文名与盈亏方向仍由八相名决定，两个源下文字一致。 */
+    const lit = Number(astro?.moonLit);
+    return {
+        moonrise, moonset,
+        phase: {
+            name: base.name,
+            waxing: base.waxing,
+            lit: Number.isFinite(lit) ? lit : base.lit,
+        },
+    };
 }
 
 /* 当天全部天文事件（分钟数）。时间形如 "2026-09-15T06:12+08:00"，只取时刻。
@@ -484,23 +658,81 @@ function degreesToCompass(degrees) {
     return COMPASS_CODES[Math.round(normalized / 22.5) % 16];
 }
 
+/* 蒲福风级的上限风速（m/s），用于把 Open-Meteo 的风速换算成风级。
+ * 和风直接返回级数，Open-Meteo 只给风速，界面上的「N 级」靠这张表补。 */
+const BEAUFORT_MAX_MS = [0.2, 1.5, 3.3, 5.4, 7.9, 10.7, 13.8, 17.1,
+                         20.7, 24.4, 28.4, 32.6];
+
+function beaufortFromMs(ms) {
+    const v = Number(ms);
+    if (!Number.isFinite(v) || v < 0)
+        return null;
+    for (let i = 0; i < BEAUFORT_MAX_MS.length; i++) {
+        if (v <= BEAUFORT_MAX_MS[i])
+            return i;
+    }
+    return 12;
+}
+
+/* 逐时数组里最后一个不晚于 nowIso 的下标。
+ * 时间戳是 ISO 本地时间串（形如 2026-09-20T10:00），同格式下字符串比较
+ * 等价于时间比较。用来从逐时数据里取"当前"那一格——露点、能见度、
+ * 紫外线只在 hourly 里，current 块没有。 */
+function lastHourlyIndex(times, nowIso) {
+    if (!Array.isArray(times) || !nowIso)
+        return -1;
+    const key = String(nowIso).slice(0, 13);
+    let idx = -1;
+    for (let i = 0; i < times.length; i++) {
+        if (String(times[i]).slice(0, 13) <= key)
+            idx = i;
+        else
+            break;
+    }
+    return idx;
+}
+
 function getOpenMeteoUrl(lat, lon) {
     const query = [
-        'current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,' +
-            'wind_speed_10m,wind_direction_10m,surface_pressure,is_day',
-        'daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset',
-        `forecast_days=${FORECAST_DAYS}`,
+        'current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,' +
+            'precipitation,weather_code,cloud_cover,pressure_msl,' +
+            'wind_speed_10m,wind_direction_10m,wind_gusts_10m',
+        // 这三项 current 里没有，只能从逐时数据按当前小时取
+        'hourly=dew_point_2m,visibility,uv_index',
+        'daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,' +
+            'uv_index_max,moonrise,moonset,moon_phase',
+        // 和风用 m/s，这里显式对齐，免得界面单位随数据源跳变
+        'wind_speed_unit=ms',
+        `forecast_days=${OPEN_METEO_FORECAST_DAYS}`,
         'timezone=auto',
     ].join('&');
     return `${OPEN_METEO_HOST}/v1/forecast?latitude=${formatCoord(lat)}&longitude=${formatCoord(lon)}&${query}`;
 }
 
+/* 国标 AQI 要按 24 小时均值算，只取 current 不够，所以把逐时数据
+ * 也拉下来自行平均（past_days=1 提供算均值所需的历史小时）。 */
+function getOpenMeteoAirQualityUrl(lat, lon) {
+    const query = [
+        'hourly=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone',
+        'past_days=1',
+        'forecast_days=1',
+        'timezone=auto',
+    ].join('&');
+    return `${OPEN_METEO_AQI_HOST}/v1/air-quality?latitude=${formatCoord(lat)}&longitude=${formatCoord(lon)}&${query}`;
+}
+
 /* 把 Open-Meteo 的响应整理成和风 v1 的形状。
  * 这样 _updateUI 只认一种数据结构，不必在界面代码里到处判断来源；
  * 代价是多一层转换，但比在每个字段处分叉要清楚得多。 */
-function openMeteoAsQweatherCurrent(json) {
+function openMeteoAsQweatherCurrent(json, nowIso) {
     const cur = json?.current ?? {};
+    const hourly = json?.hourly ?? {};
+    const hi = lastHourlyIndex(hourly.time, nowIso);
+    const at = key => (hi >= 0 && Array.isArray(hourly[key]) ? hourly[key][hi] : null);
     const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
+    const humidity = num(cur.relative_humidity_2m);
+    const cloud = num(cur.cloud_cover);
+
     return {
         condition: {
             code: wmoToQweatherCode(cur.weather_code, cur.is_day !== 0),
@@ -508,23 +740,75 @@ function openMeteoAsQweatherCurrent(json) {
         },
         temperature: { value: num(cur.temperature_2m) },
         feelsLike: { value: num(cur.apparent_temperature) },
-        // Open-Meteo 的湿度已是 0–100，转成和风的 0–1 以免下游重复换算
-        humidity: num(cur.relative_humidity_2m) === null ? null : num(cur.relative_humidity_2m) / 100,
+        // Open-Meteo 的湿度与云量都是 0–100，转成和风的 0–1 以免下游重复换算
+        humidity: humidity === null ? null : humidity / 100,
+        cloudCover: cloud === null ? null : cloud / 100,
         wind: {
             direction: { compass: degreesToCompass(cur.wind_direction_10m) },
-            scale: null,   // Open-Meteo 不提供蒲福风级，界面显示 --
+            // 和风直接给级数，这里由风速换算，否则界面恒显示「--级」
+            scale: beaufortFromMs(cur.wind_speed_10m),
         },
-        pressure: { value: num(cur.surface_pressure), unit: 'hPa' },
+        // 用海平面气压而不是站点气压：和风给的也是海平面气压，
+        // 两者口径一致才能在切换数据源时读数不跳
+        pressure: { value: num(cur.pressure_msl), unit: 'hPa' },
+        visibility: { value: num(at('visibility')), unit: 'm' },
+        dewPoint: { value: num(at('dew_point_2m')) },
+        uvIndex: num(at('uv_index')),
+        windGust: { value: num(cur.wind_gusts_10m), unit: 'm/s' },
+        precipitation: { amount: { value: num(cur.precipitation), unit: 'mm' } },
+    };
+}
+
+/* Open-Meteo 的 moon_phase 是 0–1 的相位进度：0 新月、0.25 上弦、
+ * 0.5 满月、0.75 下弦。照亮比例按 (1-cos(2πp))/2 算——这比和风给的
+ * 八相名精细得多，月相圆盘可以直接按这个比例画。
+ * 中文名仍按八个主相位分档，保证两个数据源下界面文字一致。 */
+const MOON_PHASE_CENTERS = [
+    ['new-moon', 0.000], ['waxing-crescent', 0.125], ['first-quarter', 0.250],
+    ['waxing-gibbous', 0.375], ['full-moon', 0.500], ['waning-gibbous', 0.625],
+    ['last-quarter', 0.750], ['waning-crescent', 0.875],
+];
+
+function moonPhaseFromFraction(p) {
+    const v = Number(p);
+    if (!Number.isFinite(v))
+        return null;
+    const f = ((v % 1) + 1) % 1;
+    let name = MOON_PHASE_CENTERS[0][0];
+    let best = Infinity;
+    for (const [candidate, center] of MOON_PHASE_CENTERS) {
+        /* 相位是环形的：f=0.99 与新月只差 0.01，线性距离却会把它判成
+         * 残月。取正向与回绕两条路径里近的那条。 */
+        const raw = Math.abs(center - f);
+        const d = Math.min(raw, 1 - raw);
+        if (d < best) {
+            best = d;
+            name = candidate;
+        }
+    }
+    return {
+        name,
+        lit: (1 - Math.cos(2 * Math.PI * f)) / 2,
+        waxing: f < 0.5,
     };
 }
 
 function openMeteoAsQweatherDaily(json) {
     const d = json?.daily ?? {};
     const times = Array.isArray(d.time) ? d.time : [];
+    const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
     return times.map((date, i) => {
-        const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
+        const phase = moonPhaseFromFraction(d.moon_phase?.[i]);
         return {
-            astro: { sunrise: d.sunrise?.[i], sunset: d.sunset?.[i] },
+            astro: {
+                sunrise: d.sunrise?.[i],
+                sunset: d.sunset?.[i],
+                moonrise: d.moonrise?.[i],
+                moonset: d.moonset?.[i],
+                moonPhase: phase?.name ?? null,
+                // 连续照亮比例，parseMoon 会用它覆盖八相名的离散值
+                moonLit: phase?.lit ?? null,
+            },
             daytime: {
                 condition: {
                     code: wmoToQweatherCode(d.weather_code?.[i], true),
@@ -611,6 +895,10 @@ export default class ClimaCNExtension extends Extension {
         this._searchActivateId = 0;
         this._searchTextChangedId = 0;
         this._debugLoggingId = 0;
+        this._sourceCurrentId = 0;
+        this._sourceForecastId = 0;
+        this._sourceAirQualityId = 0;
+        this._sourceAstronomyId = 0;
         // 自绘图表的 repaint、刷新按钮的 activate 信号 ID，
         // 同样要在 disable() 里断开
         this._sunArcRepaintId = 0;
@@ -633,6 +921,8 @@ export default class ClimaCNExtension extends Extension {
         this._upowerSignalId = 0;
 
         this._settings = this.getSettings();
+        // 升级路径上的一次性迁移，放在读取任何设置之前
+        migrateSourceSettings(this._settings);
         this._apiKey = this._settings.get_string('api-key') || '';
         this._host = normalizeHost(this._settings.get_string('api-base-url'));
 
@@ -649,7 +939,10 @@ export default class ClimaCNExtension extends Extension {
         this._moonPosition = null;
         this._trendPoints = [];
         this._moonPhases = [];
-        this._usingFallback = false;
+        // 本次数据实际来自哪些源，由 _applyPlan 按计划拼好供归因行显示
+        this._attributionText = '';
+        // 本轮是否已经报过错，避免通用文案盖掉具体原因
+        this._errorShown = false;
 
         // _selectCity() 会连续写三个键，期间置位以免监听器重复发起请求
         this._writingSettings = false;
@@ -698,6 +991,14 @@ export default class ClimaCNExtension extends Extension {
             this._currentCityName = name;
             if (this._cityLabel) this._cityLabel.text = name;
         });
+
+        /* 数据源按类别切换会改变抓取计划，与改凭据同类，走同一个防抖：
+         * 首选项里连点下拉不该打出一串半途状态的请求。 */
+        const onSourceChanged = () => onConfigChanged();
+        this._sourceCurrentId = this._settings.connect('changed::source-current', onSourceChanged);
+        this._sourceForecastId = this._settings.connect('changed::source-forecast', onSourceChanged);
+        this._sourceAirQualityId = this._settings.connect('changed::source-air-quality', onSourceChanged);
+        this._sourceAstronomyId = this._settings.connect('changed::source-astronomy', onSourceChanged);
 
         // 调试日志默认关闭，开启状态跟随设置实时变化，无需重载扩展
         this._debugLoggingId = this._settings.connect('changed::debug-logging', () => {
@@ -792,6 +1093,22 @@ export default class ClimaCNExtension extends Extension {
         // 设置对象即将释放，日志开关一并复位
         setDebugLogging(false);
         if (this._settings) {
+            if (this._sourceCurrentId) {
+                this._settings.disconnect(this._sourceCurrentId);
+                this._sourceCurrentId = 0;
+            }
+            if (this._sourceForecastId) {
+                this._settings.disconnect(this._sourceForecastId);
+                this._sourceForecastId = 0;
+            }
+            if (this._sourceAirQualityId) {
+                this._settings.disconnect(this._sourceAirQualityId);
+                this._sourceAirQualityId = 0;
+            }
+            if (this._sourceAstronomyId) {
+                this._settings.disconnect(this._sourceAstronomyId);
+                this._sourceAstronomyId = 0;
+            }
             if (this._apiKeyChangedId) {
                 this._settings.disconnect(this._apiKeyChangedId);
                 this._apiKeyChangedId = 0;
@@ -842,7 +1159,8 @@ export default class ClimaCNExtension extends Extension {
         this._moonPosition = null;
         this._trendPoints = [];
         this._moonPhases = [];
-        this._usingFallback = false;
+        this._attributionText = '';
+        this._errorShown = false;
         this._lastFetchAt = 0;
         this._onBattery = false;
         this._upowerSignalId = 0;
@@ -1671,8 +1989,10 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _autoRefreshTick() {
-        // 今日额度用尽：不再自动请求，等次日归零或用户手动刷新
-        if (this._requestBudgetExhausted()) {
+        /* 今日额度用尽就停自动刷新，但只有四类内容**全都**依赖和风时才停。
+         * 之前这里无条件 return，导致「额度用尽 + 已把某类指给 Open-Meteo」
+         * 时自动刷新也一并停摆——而那一类其实还能照常供数。 */
+        if (this._requestBudgetExhausted() && !this._anyOpenMeteoSource()) {
             this._updateNotice();
             return;
         }
@@ -1756,90 +2076,74 @@ export default class ClimaCNExtension extends Extension {
         this._showError(`请求失败（HTTP ${status}）`, 'network');
     }
 
-    /* 是否改走 Open-Meteo：需用户在首选项里显式开启，且和风确实不可用
-     * （凭据缺失或当日额度已用尽）。默认关闭，不做无谓的第三方请求。 */
-    _shouldUseFallback() {
-        if (!this._settings?.get_boolean('use-open-meteo-fallback'))
-            return false;
-        return !this._apiKey || !this._host || this._requestBudgetExhausted();
+    /* -----------------------------------------------------------------
+     * 数据源选择
+     * 四类内容各自独立选源。之所以分四类而不是一个总开关：两个源各有
+     * 长短——和风提供天文/航海/民用三段曙暮光，Open-Meteo 免凭据、
+     * 逐日预报多 6 天、月相是连续的照亮比例而非八相名。
+     * ----------------------------------------------------------------- */
+
+    _qweatherConfigured() {
+        return !!(this._apiKey && this._apiKey.trim() && this._host);
     }
 
-    /* Open-Meteo 不需要凭据，响应先归一化成和风的形状再交给 _updateUI。
-     * 它不消耗和风额度，因此不计入每日请求数。 */
-    _fetchFromOpenMeteo() {
-        const seq = ++this._requestSeq;
-        this._lastFetchAt = GLib.get_monotonic_time() / 1e6;
-
-        const message = Soup.Message.new('GET', getOpenMeteoUrl(this._latitude, this._longitude));
-        if (!message)
-            return;
-
-        this._session.send_and_read_async(
-            message,
-            Soup.MessagePriority.NORMAL,
-            this._cancellable,
-            (session, result) => {
-                try {
-                    const bytes = session.send_and_read_finish(result);
-                    if (!this._enabled || this._cancellable?.is_cancelled()) return;
-                    if (seq !== this._requestSeq) return;
-
-                    if (message.status_code !== Soup.Status.OK) {
-                        logError(`Open-Meteo HTTP ${message.status_code}`);
-                        this._showError(_('备用数据源请求失败'), 'network');
-                        return;
-                    }
-                    const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
-                    const current = openMeteoAsQweatherCurrent(json);
-                    const daily = openMeteoAsQweatherDaily(json);
-                    if (daily.length === 0) {
-                        this._showError(_('备用数据源返回数据不完整'), 'data');
-                        return;
-                    }
-                    this._usingFallback = true;
-                    this._updateUI(current, daily, null);   // 兜底不提供 AQI
-                } catch (e) {
-                    if (!this._enabled) return;
-                    logError(`Open-Meteo parse error: ${e}`);
-                    this._showError(_('备用数据源解析失败'), 'network');
-                }
-            }
-        );
+    _qweatherUsable() {
+        return this._qweatherConfigured() && !this._requestBudgetExhausted();
     }
 
-    _fetchWeather() {
-        if (!this._enabled) return;
-
-        // 和风不可用且用户允许兜底时，改走 Open-Meteo
-        if (this._shouldUseFallback()) {
-            this._fetchFromOpenMeteo();
-            return;
+    /* 'auto' 在和风可用时用和风，否则退回 Open-Meteo。
+     * 读设置失败也按 auto 处理，不让一个坏值把界面弄空。 */
+    _sourceFor(category) {
+        let mode = 'auto';
+        try {
+            mode = this._settings?.get_string(`source-${category}`) || 'auto';
+        } catch (_e) {
+            mode = 'auto';
         }
+        if (mode === 'qweather' || mode === 'openmeteo')
+            return mode;
+        return this._qweatherUsable() ? 'qweather' : 'openmeteo';
+    }
 
-        if (!this._apiKey || this._apiKey.trim() === '') {
-            this._showError(_('请在设置中配置 API Key'), 'config');
-            return;
-        }
-        if (!this._host) {
-            this._showError(_('请在设置中配置 API Host'), 'config');
-            return;
-        }
-        // _enabled 为真即保证 enable() 已跑完，_cancellable 必定存在
-        if (this._cancellable.is_cancelled())
-            this._cancellable = new Gio.Cancellable();
+    /* 四个类别 → 需要发哪些请求。同一源的多个类别共用一次请求：
+     * Open-Meteo 的 /v1/forecast 一次就给出实时 + 逐日 + 天文。 */
+    _buildFetchPlan() {
+        const src = {
+            current: this._sourceFor('current'),
+            forecast: this._sourceFor('forecast'),
+            airQuality: this._sourceFor('air-quality'),
+            astronomy: this._sourceFor('astronomy'),
+        };
+        return {
+            src,
+            qwCurrent: src.current === 'qweather',
+            qwDaily: src.forecast === 'qweather' || src.astronomy === 'qweather',
+            qwAqi: src.airQuality === 'qweather',
+            omForecast: src.current === 'openmeteo' || src.forecast === 'openmeteo' ||
+                        src.astronomy === 'openmeteo',
+            omAqi: src.airQuality === 'openmeteo',
+        };
+    }
 
-        const url = getWeatherUrl(this._host, this._latitude, this._longitude);
-        const message = Soup.Message.new('GET', url);
-        if (!message) return;
-        message.request_headers.append('X-Qw-Api-Key', this._apiKey);
+    _attributionFor(plan) {
+        const names = [];
+        if (plan.qwCurrent || plan.qwDaily || plan.qwAqi)
+            names.push(_('和风天气'));
+        // Open-Meteo 是产品名，不翻译
+        if (plan.omForecast || plan.omAqi)
+            names.push('Open-Meteo');
+        return names.join(' + ');
+    }
 
-        this._lastFetchAt = GLib.get_monotonic_time() / 1e6;
-        this._countRequest();
+    /* 是否有任何一类内容会走 Open-Meteo。额度用尽时用它决定要不要停自动刷新。 */
+    _anyOpenMeteoSource() {
+        const plan = this._buildFetchPlan();
+        return plan.omForecast || plan.omAqi;
+    }
 
-        // 请求序号：快速连续切换城市时，先发的请求可能后返回，
-        // 若不丢弃过期响应，会出现"标题是新城市、数据是旧城市"的错配
-        const seq = ++this._requestSeq;
-
+    /* 共用的请求收尾：四个 fetch 函数的守卫与错误处理完全一样，
+     * 抽出来避免四份拷贝各自漂移。onText 返回解析后的 JSON，失败返回 null。 */
+    _sendJson(message, seq, label, onText) {
         this._session.send_and_read_async(
             message,
             Soup.MessagePriority.NORMAL,
@@ -1848,45 +2152,195 @@ export default class ClimaCNExtension extends Extension {
                 try {
                     const bytes = session.send_and_read_finish(result);
                     // disable() 之后 UI 引用均已释放，不可再触碰
-                    if (!this._enabled || this._cancellable?.is_cancelled()) return;
+                    if (!this._enabled || this._cancellable?.is_cancelled())
+                        return;
                     // 已有更新的请求发出，本次结果作废
-                    if (seq !== this._requestSeq) return;
-
+                    if (seq !== this._requestSeq)
+                        return;
                     if (message.status_code !== Soup.Status.OK) {
-                        this._handleHttpError(message, bytes);
-                        return;
+                        logError(`${label} HTTP ${message.status_code}`);
+                        return onText(null);
                     }
-
-                    const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
-                    if (!json.condition || !json.temperature) {
-                        logError(`响应缺少预期字段: ${JSON.stringify(json).slice(0, 300)}`);
-                        this._showError(_('数据格式异常'), 'data');
-                        return;
-                    }
-                    // 预报与空气质量并行拉取，两个都回来再更新界面。
-                    // 串行的话，空气质量接口慢或不可用会把整个界面拖住。
-                    const pending = {};
-                    const settle = () => {
-                        if (!('forecast' in pending) || !('aqi' in pending)) return;
-                        if (!this._enabled || seq !== this._requestSeq) return;
-                        this._usingFallback = false;   // 本次数据来自和风
-                        this._updateUI(json, pending.forecast, pending.aqi);
-                    };
-                    this._fetchForecast(seq, (forecast) => {
-                        pending.forecast = forecast;
-                        settle();
-                    });
-                    this._fetchAirQuality(seq, (aqi) => {
-                        pending.aqi = aqi;
-                        settle();
-                    });
+                    return onText(JSON.parse(new TextDecoder().decode(bytes.get_data())));
                 } catch (e) {
-                    if (!this._enabled) return;
-                    logError(`Network/parse error: ${e}`);
-                    this._showError(_('获取失败'), 'network');
+                    if (!this._enabled)
+                        return;
+                    logError(`${label} error: ${e}`);
+                    return onText(null);
                 }
             }
         );
+    }
+
+    /* Open-Meteo 不需要凭据，也不消耗和风额度，因此不计入每日请求数。
+     * 一次请求同时拿到实时、逐日与天文三块，回调里一并交出去。 */
+    _fetchOpenMeteoForecast(seq, callback) {
+        const message = Soup.Message.new('GET',
+            getOpenMeteoUrl(this._latitude, this._longitude));
+        if (!message) {
+            callback(null);
+            return;
+        }
+        const nowIso = GLib.DateTime.new_now_local().format('%Y-%m-%dT%H:00');
+        this._sendJson(message, seq, 'Open-Meteo', json => {
+            if (!json) {
+                this._showError(_('备用数据源请求失败'), 'network');
+                callback(null);
+                return;
+            }
+            const daily = openMeteoAsQweatherDaily(json);
+            if (daily.length === 0) {
+                this._showError(_('备用数据源返回数据不完整'), 'data');
+                callback(null);
+                return;
+            }
+            callback({
+                current: openMeteoAsQweatherCurrent(json, nowIso),
+                daily,
+            });
+        });
+    }
+
+    /* 空气质量单独一个端点。拉逐时数据是为了按国标算 24 小时均值。 */
+    _fetchOpenMeteoAirQuality(seq, callback) {
+        const message = Soup.Message.new('GET',
+            getOpenMeteoAirQualityUrl(this._latitude, this._longitude));
+        if (!message) {
+            callback(null);
+            return;
+        }
+        const nowIso = GLib.DateTime.new_now_local().format('%Y-%m-%dT%H:00');
+        this._sendJson(message, seq, 'Open-Meteo AQI', json => {
+            // 空气质量取不到不算致命：色环整块隐藏，其它数据照常显示
+            callback(json ? chinaAqiFromHourly(nowIso, json) : null);
+        });
+    }
+
+    _fetchWeather() {
+        if (!this._enabled)
+            return;
+
+        const plan = this._buildFetchPlan();
+
+        /* 用户显式把某一类指给和风、凭据却不全时，给出配置提示。
+         * auto 走不到这里——凭据不全时它已经退回 Open-Meteo 了。 */
+        if ((plan.qwCurrent || plan.qwDaily || plan.qwAqi) && !this._qweatherConfigured()) {
+            this._showError(this._apiKey?.trim()
+                ? _('请在设置中配置 API Host')
+                : _('请在设置中配置 API Key'), 'config');
+            return;
+        }
+
+        // _enabled 为真即保证 enable() 已跑完，_cancellable 必定存在
+        if (this._cancellable.is_cancelled())
+            this._cancellable = new Gio.Cancellable();
+
+        this._lastFetchAt = GLib.get_monotonic_time() / 1e6;
+        this._errorShown = false;   // 每轮重置，用来避免通用错误盖掉具体原因
+
+        // 请求序号：快速连续切换城市时，先发的请求可能后返回，
+        // 若不丢弃过期响应，会出现"标题是新城市、数据是旧城市"的错配
+        const seq = ++this._requestSeq;
+
+        // 这一轮要等哪些结果到齐。没被计划到的请求根本不发、也不等。
+        const needed = [];
+        if (plan.qwCurrent) needed.push('qwCurrent');
+        if (plan.qwDaily) needed.push('qwDaily');
+        if (plan.qwAqi) needed.push('qwAqi');
+        if (plan.omForecast) needed.push('omForecast');
+        if (plan.omAqi) needed.push('omAqi');
+
+        const pending = {};
+        let settled = false;
+        const settle = () => {
+            if (settled || !needed.every(k => k in pending))
+                return;
+            settled = true;
+            if (!this._enabled || seq !== this._requestSeq)
+                return;
+            this._applyPlan(plan, pending);
+        };
+        const done = (key, value) => {
+            pending[key] = value;
+            settle();
+        };
+
+        /* 各路并行发出。原来是「实时先探路，成功了再发另外两个」的两段式；
+         * 现在四类内容各自独立选源、彼此没有依赖，串行只会白白拉长等待。 */
+        if (plan.qwCurrent)
+            this._fetchQweatherCurrent(seq, v => done('qwCurrent', v));
+        if (plan.qwDaily)
+            this._fetchForecast(seq, v => done('qwDaily', v));
+        if (plan.qwAqi)
+            this._fetchAirQuality(seq, v => done('qwAqi', v));
+        if (plan.omForecast)
+            this._fetchOpenMeteoForecast(seq, v => done('omForecast', v));
+        if (plan.omAqi)
+            this._fetchOpenMeteoAirQuality(seq, v => done('omAqi', v));
+    }
+
+    _fetchQweatherCurrent(seq, callback) {
+        const message = Soup.Message.new('GET',
+            getWeatherUrl(this._host, this._latitude, this._longitude));
+        if (!message) {
+            callback(null);
+            return;
+        }
+        message.request_headers.append('X-Qw-Api-Key', this._apiKey);
+        this._countRequest();
+        this._sendJson(message, seq, '和风实时', json => {
+            if (json && (!json.condition || !json.temperature)) {
+                logError(`响应缺少预期字段: ${JSON.stringify(json).slice(0, 300)}`);
+                json = null;
+            }
+            callback(json);
+        });
+    }
+
+    /* 把各路结果按计划合并成 _updateUI 认的三个对象。
+     * 逐日与天文可能来自不同源，所以要用天文源的 astro 覆盖逐日数组里的
+     * astro 块——parseAstro 只看第 0 天，parseMoonPhases 每天都要读。 */
+    _applyPlan(plan, pending) {
+        const om = pending.omForecast ?? null;
+        const omDays = Array.isArray(om?.daily) ? om.daily : null;
+
+        const now = plan.src.current === 'qweather'
+            ? (pending.qwCurrent ?? null)
+            : (om?.current ?? null);
+
+        const baseDays = plan.src.forecast === 'qweather'
+            ? (pending.qwDaily ?? null)
+            : omDays;
+        const astroDays = plan.src.astronomy === 'qweather'
+            ? (pending.qwDaily ?? null)
+            : omDays;
+
+        let forecast = baseDays;
+        if (Array.isArray(baseDays) && Array.isArray(astroDays) && baseDays !== astroDays) {
+            forecast = baseDays.map((d, i) =>
+                astroDays[i]?.astro ? { ...d, astro: astroDays[i].astro } : d);
+        } else if (!Array.isArray(baseDays) && Array.isArray(astroDays)) {
+            // 逐日预报失败但天文献成功：保住日月弧线，温度行自然显示 --
+            forecast = astroDays.map(d => ({ astro: d.astro }));
+        }
+
+        const aqi = plan.src.airQuality === 'qweather'
+            ? (pending.qwAqi ?? null)
+            : (pending.omAqi ?? null);
+
+        if (!now) {
+            // 具体原因各路已经报过，这里不再用通用文案盖掉
+            if (!this._errorShown)
+                this._showError(_('获取失败'), 'network');
+            return;
+        }
+        if (now.temperature?.value === null || now.temperature?.value === undefined) {
+            this._showError(_('数据格式异常'), 'data');
+            return;
+        }
+
+        this._attributionText = this._attributionFor(plan);
+        this._updateUI(now, forecast, aqi);
     }
 
     _fetchForecast(seq, callback) {
@@ -2548,7 +3002,8 @@ export default class ClimaCNExtension extends Extension {
         // 完整的说明与链接放在首选项的“数据来源”分组里
         if (this._attributionItem) {
             // 走兜底时必须标明来源，否则用户会以为数据仍来自和风
-            this._attributionLabel.text = this._usingFallback ? 'Open-Meteo' : _('和风天气');
+            // 四类内容可能来自不同源，文案由 _applyPlan 按实际计划拼好
+            this._attributionLabel.text = this._attributionText || '';
             this._attributionItem.visible = true;
         }
 
@@ -2712,6 +3167,9 @@ export default class ClimaCNExtension extends Extension {
 
     /* kind 见 _errorIconName：network / auth / config / data，缺省为通用 */
     _showError(message = _('获取失败'), kind = 'error') {
+        /* 记下这一轮已经报过错。各路请求并行返回，晚到的通用错误
+         * 不该把先前那条更具体的原因（如 401 凭据无效）盖掉。 */
+        this._errorShown = true;
         const iconName = this._errorIconName(kind);
         this._applyIcon(this._weatherIcon, null, iconName);
         this._applyIcon(this._headerIcon, null, iconName);
