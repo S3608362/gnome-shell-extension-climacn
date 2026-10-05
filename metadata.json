@@ -1,6 +1,6 @@
 {
   "name": "ClimaCN",
-  "description": "Live China weather, right on your desktop.",
+  "description": "中国大陆的天气扩展：实时天气、逐日预报、空气质量与日月天文信息。",
   "uuid": "climacn-weather@outlook.com",
   "shell-version": [ "45", "46", "47", "48", "49", "50" ],
   "settings-schema": "org.gnome.shell.extensions.climacn-weather@outlook.com",
