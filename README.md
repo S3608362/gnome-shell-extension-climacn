@@ -49,6 +49,8 @@ ClimaCN 内置全国城市数据库，支持自定义 API Host，图标完美适
 
 ## 📦 安装方法
 
+支持 GNOME Shell 45 – 51。
+
 ### 安装
 
 1. 下载 [最新版本](https://github.com/S3608362/gnome-shell-extension-climacn/releases/latest) 的 `.shell-extension.zip`
