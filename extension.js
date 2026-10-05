@@ -182,10 +182,15 @@ function parseAqiIndex(json) {
         return null;
     const c = idx?.color ?? {};
     const channel = v => (toFiniteOrNull(v) ?? 128);
+    const pp = idx?.primaryPollutant;
+    const ppCode = String(pp?.code ?? '').trim().toLowerCase();
     return {
         aqi,
         display: idx?.aqiDisplay || String(Math.round(aqi)),
         category: idx?.category || '',
+        primary: aqi > 50 && ppCode && ppCode !== 'na'
+            ? String(pp?.name ?? '').trim()
+            : '',
         color: { r: channel(c.red), g: channel(c.green), b: channel(c.blue) },
     };
 }
@@ -208,13 +213,13 @@ const AQI_BREAKPOINTS = {
     o3:   [0, 100, 160, 215, 265, 800],
 };
 
-const AQI_POLLUTANT_ZH = {
-    pm25: '细颗粒物（PM2.5）',
-    pm10: '可吸入颗粒物（PM10）',
-    so2: '二氧化硫',
-    no2: '二氧化氮',
-    co: '一氧化碳',
-    o3: '臭氧',
+const AQI_POLLUTANT_SHORT = {
+    pm25: 'PM2.5',
+    pm10: 'PM10',
+    so2: 'SO₂',
+    no2: 'NO₂',
+    co: 'CO',
+    o3: 'O₃',
 };
 
 const AQI_CATEGORIES = [
@@ -298,7 +303,7 @@ function chinaAqiFromHourly(nowIso, aq) {
         aqi,
         display: String(aqi),
         category: aqiCategory(aqi),
-        primary: aqi > 50 ? AQI_POLLUTANT_ZH[primaryKey] : '',
+        primary: aqi > 50 ? (AQI_POLLUTANT_SHORT[primaryKey] ?? '') : '',
         color: aqiColor(aqi),
     };
 }
@@ -1275,6 +1280,8 @@ export default class ClimaCNExtension extends Extension {
         this._humidityLabel = null;
         this._windLabel = null;
         this._updateTimeLabel = null;
+        this._aqiCategoryLabel = null;
+        this._aqiPrimaryLabel = null;
         this._pressureLabel = null;
         this._visibilityLabel = null;
         this._dewPointLabel = null;
@@ -1924,12 +1931,14 @@ export default class ClimaCNExtension extends Extension {
         });
 
         const row1 = this._createGridRow(grid);
-        this._feelsLikeLabel  = this._createGridCell(row1, '体感', '--°');
-        this._humidityLabel   = this._createGridCell(row1, '湿度', '--%');
+        this._feelsLikeLabel   = this._createGridCell(row1, '体感', '--°');
+        this._humidityLabel    = this._createGridCell(row1, '湿度', '--%');
+        this._windLabel        = this._createGridCell(row1, '风向', '--');
 
         const row2 = this._createGridRow(grid);
-        this._windLabel       = this._createGridCell(row2, '风向', '--');
-        this._updateTimeLabel = this._createGridCell(row2, '上次更新', '--:--');
+        this._updateTimeLabel  = this._createGridCell(row2, '更新时间', '--:--');
+        this._aqiCategoryLabel = this._createGridCell(row2, '空气质量', '--');
+        this._aqiPrimaryLabel  = this._createGridCell(row2, '首要污染物', '--');
 
         const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
         item.add_child(grid);
@@ -3239,6 +3248,8 @@ export default class ClimaCNExtension extends Extension {
         this._windLabel.text =
             `${compassToChinese(now.wind?.direction?.compass)} ${now.wind?.scale ?? '--'}级`;
         this._updateTimeLabel.text = GLib.DateTime.new_now_local().format('%H:%M');
+        this._aqiCategoryLabel.text = this._aqi?.category || '--';
+        this._aqiPrimaryLabel.text = this._aqi ? (this._aqi.primary || '—') : '--';
 
         const pressureValue = toFiniteOrNull(now.pressure?.value);
         const nowSec = Math.floor(Date.now() / 1000);
@@ -3416,7 +3427,8 @@ export default class ClimaCNExtension extends Extension {
         this._headerCondition.text = message;
 
         for (const label of [this._feelsLikeLabel, this._humidityLabel, this._windLabel,
-                             this._updateTimeLabel, this._pressureLabel, this._visibilityLabel,
+                             this._updateTimeLabel, this._aqiCategoryLabel, this._aqiPrimaryLabel,
+                             this._pressureLabel, this._visibilityLabel,
                              this._dewPointLabel, this._cloudCoverLabel, this._uvIndexLabel,
                              this._windGustLabel, this._precipLabel]) {
             if (label)

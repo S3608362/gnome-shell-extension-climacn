@@ -106,20 +106,21 @@
 }
 
 .climacn-details-grid {
-  spacing: 8px;
+  padding: 6px 12px;
+  spacing: 6px;
 }
 
 .climacn-detail-row {
-  spacing: 12px;
+  spacing: 10px;
 }
 
 .climacn-detail-cell {
-  spacing: 8px;
+  spacing: 6px;
 }
 
 .climacn-detail-label {
   font-size: 0.9em;
-  width: 4.5em;
+  width: 5.5em;
   text-align: left;
   opacity: 0.7;
 }
