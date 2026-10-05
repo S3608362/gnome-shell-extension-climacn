@@ -13,22 +13,22 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const UPDATE_INTERVAL_SEC = 15 * 60;      
-const BATTERY_INTERVAL_SEC = 30 * 60;     
-const CACHE_TTL_SEC = 5 * 60;             
-const MANUAL_COOLDOWN_SEC = 60;           
-const DAILY_REQUEST_BUDGET = 800;         
-const AQI_RING_SIZE = 34;                 
-const AQI_FONT_PX = 10;                   
-const AQI_MAX_FAILURES = 2;               
-const FORECAST_DAYS = 10;                 
-const FORECAST_ROWS = 3;                  
+const UPDATE_INTERVAL_SEC = 15 * 60;
+const BATTERY_INTERVAL_SEC = 30 * 60;
+const CACHE_TTL_SEC = 5 * 60;
+const MANUAL_COOLDOWN_SEC = 60;
+const DAILY_REQUEST_BUDGET = 800;
+const AQI_RING_SIZE = 34;
+const AQI_FONT_PX = 10;
+const AQI_MAX_FAILURES = 2;
+const FORECAST_DAYS = 10;
+const FORECAST_ROWS = 3;
 
 const CALENDAR_COLS = 4;
 
-const SUN_ARC_HEIGHT = 60;                
-const MOON_ARC_HEIGHT = 56;               
-const MOON_DISC_RADIUS = 7;               
+const SUN_ARC_HEIGHT = 60;
+const MOON_ARC_HEIGHT = 56;
+const MOON_DISC_RADIUS = 7;
 
 function arcSideInset(lineWidth, scaleFactor) {
     const lineGap = lineWidth + 3 * scaleFactor;
@@ -43,11 +43,11 @@ const SKY_DAY       = [1.00, 0.72, 0.20];
 
 const MOON_LIT_ALPHA = 0.85;
 const MOON_DARK_ALPHA = 0.16;
-const TREND_CHART_HEIGHT = 64;            
-const TREND_CHART_WIDTH = 400;            
-const TREND_LABEL_PX = 8;                 
-const MOON_STRIP_HEIGHT = 30;             
-const TEMP_BAR_HEIGHT = 8;                
+const TREND_CHART_HEIGHT = 64;
+const TREND_CHART_WIDTH = 400;
+const TREND_LABEL_PX = 8;
+const MOON_STRIP_HEIGHT = 30;
+const TEMP_BAR_HEIGHT = 8;
 
 const TEMP_BAR_WIDTH = 110;
 
@@ -106,8 +106,8 @@ function formatCoord(value) {
 
 function normalizeHost(raw) {
     const host = (raw || '').trim()
-        .replace(/^https?:\/\//i, '')   
-        .split('/')[0];                 
+        .replace(/^https?:\/\//i, '')
+        .split('/')[0];
     if (!host)
         return '';
     return `https://${host}`;
@@ -255,7 +255,7 @@ function iaqiFrom(concentration, table) {
             return Math.round(loI + (hiI - loI) * (c - lo) / (hi - lo));
         }
     }
-    return AQI_LEVELS[table.length - 1];   
+    return AQI_LEVELS[table.length - 1];
 }
 
 function meanOf(values) {
@@ -303,10 +303,10 @@ function chinaAqiFromHourly(nowIso, aq) {
     };
 }
 
-const PRESSURE_WINDOW_SEC = 3 * 3600;   
+const PRESSURE_WINDOW_SEC = 3 * 3600;
 const PRESSURE_MAX_SAMPLES = 24;
-const PRESSURE_STEADY_HPA = 1.0;        
-const PRESSURE_MIN_SPAN_SEC = 30 * 60;  
+const PRESSURE_STEADY_HPA = 1.0;
+const PRESSURE_MIN_SPAN_SEC = 30 * 60;
 
 function parsePressureHistory(raw) {
     try {
@@ -318,7 +318,7 @@ function parsePressureHistory(raw) {
             .filter(e => e.t !== null && e.p !== null)
             .sort((a, b) => a.t - b.t);
     } catch (_e) {
-        return [];   
+        return [];
     }
 }
 
@@ -685,7 +685,7 @@ function openMeteoAsQweatherDaily(json) {
             },
             temperatureMin: { value: num(d.temperature_2m_min?.[i]) },
             temperatureMax: { value: num(d.temperature_2m_max?.[i]) },
-            _date: date,   
+            _date: date,
         };
     });
 }
@@ -741,6 +741,10 @@ function parseCsvLine(line) {
 const CMA_ALERT_HOST = 'https://weather.cma.cn';
 const ALERT_MAX_FAILURES = 3;
 
+const ALERT_DETAIL_WIDTH = 400;
+
+const ALERT_DETAIL_FAILED = { failed: true };
+
 const ALERT_MAX_DISTANCE_KM = 150;
 
 const ALERT_LEVELS = {
@@ -757,6 +761,10 @@ function alertLevel(severity) {
 
 function getCmaAlertsUrl(stationId) {
     return `${CMA_ALERT_HOST}/api/weather/view?stationid=${encodeURIComponent(stationId)}`;
+}
+
+function getCmaAlertDetailUrl(alertId) {
+    return `${CMA_ALERT_HOST}/api/alarm/${encodeURIComponent(alertId)}`;
 }
 
 function parseStationList(csvText) {
@@ -789,7 +797,7 @@ function findNearestStation(stations, lat, lon, maxKm = ALERT_MAX_DISTANCE_KM) {
         if (!best || d2 < best.d2)
             best = { d2, station: s };
     }
-    const km = Math.sqrt(best.d2) * 111.0;   
+    const km = Math.sqrt(best.d2) * 111.0;
     return km <= maxKm ? { ...best.station, km } : null;
 }
 
@@ -809,6 +817,19 @@ function parseAlerts(json) {
             };
         })
         .sort((a, b) => b.level.rank - a.level.rank);
+}
+
+function parseAlertDetail(json) {
+    const d = json?.data;
+    if (!d || typeof d !== 'object')
+        return null;
+    const text = v => (typeof v === 'string' ? v.trim() : '');
+    return {
+        sender: text(d.sender),
+        effective: text(d.effective),
+        description: text(d.description),
+        guide: text(d.guide),
+    };
 }
 
 export default class ClimaCNExtension extends Extension {
@@ -840,7 +861,10 @@ export default class ClimaCNExtension extends Extension {
         this._alertItem = null;
         this._alertLabel = null;
         this._alertDot = null;
+        this._alertDetailBox = null;
+        this._alertExpandId = 0;
         this._alerts = [];
+        this._alertDetails = new Map();
         this._cmaStations = null;
         this._loadingStations = false;
         this._stationWaiters = [];
@@ -854,7 +878,7 @@ export default class ClimaCNExtension extends Extension {
         this._isLoadingCities = false;
         this._iconExistsCache = new Map();
         this._requestSeq = 0;
-        this._lastFetchAt = 0;      
+        this._lastFetchAt = 0;
         this._onBattery = false;
         this._upower = null;
         this._upowerSignalId = 0;
@@ -948,7 +972,7 @@ export default class ClimaCNExtension extends Extension {
             if (!this._enabled) return;
             this._alertGen++;
             if (this._settings.get_boolean('show-alerts')) {
-                this._alertFailCount = 0;   
+                this._alertFailCount = 0;
                 this._refreshAlerts();
             } else {
                 this._updateAlerts([]);
@@ -1117,6 +1141,9 @@ export default class ClimaCNExtension extends Extension {
         this._alertGen = 0;
         this._alertFailCount = 0;
         this._alerts = [];
+        this._alertDetails = null;
+        this._alertDetailBox = null;
+        this._alertExpandId = 0;
         this._cmaStations = null;
         this._loadingStations = false;
         this._stationWaiters = [];
@@ -1290,7 +1317,7 @@ export default class ClimaCNExtension extends Extension {
             const dm = Main.panel.statusArea?.dateMenu;
             host = dm?._weatherItem?.get_parent() ?? dm?._displaysSection?.child ?? null;
         } catch (_e) {
-            host = null;   
+            host = null;
         }
         if (!host || typeof host.add_child !== 'function')
             return;
@@ -1464,7 +1491,7 @@ export default class ClimaCNExtension extends Extension {
         const box = new St.BoxLayout({
             style_class: 'climacn-sun-arc',
             y_align: Clutter.ActorAlign.CENTER,
-            x_expand: true   
+            x_expand: true
         });
 
         this._sunriseLabel = new St.Label({
@@ -1492,7 +1519,7 @@ export default class ClimaCNExtension extends Extension {
 
         this._sunArcItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
         this._sunArcItem.add_child(box);
-        this._sunArcItem.visible = false;   
+        this._sunArcItem.visible = false;
         this._indicator.menu.addMenuItem(this._sunArcItem);
     }
 
@@ -1547,29 +1574,137 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _buildAlerts() {
-        const box = new St.BoxLayout({
-            style_class: 'climacn-alert-row',
-            y_align: Clutter.ActorAlign.CENTER
-        });
+        this._alertItem = new PopupMenu.PopupSubMenuMenuItem('', false);
+        this._alertItem.add_style_class_name('climacn-alert-row');
 
         this._alertDot = new St.Widget({
             style_class: 'climacn-alert-dot alert-unknown',
             y_align: Clutter.ActorAlign.CENTER
         });
-        box.add_child(this._alertDot);
+        this._alertItem.insert_child_at_index(this._alertDot, 0);
+        this._alertLabel = this._alertItem.label;
+        this._alertLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
 
-        this._alertLabel = new St.Label({
-            style_class: 'climacn-alert-label',
-            text: '',
-            x_expand: true,
-            y_align: Clutter.ActorAlign.CENTER
+        this._alertDetailBox = new St.BoxLayout({
+            orientation: Clutter.Orientation.VERTICAL,
+            style_class: 'climacn-alert-detail-box'
         });
-        box.add_child(this._alertLabel);
+        const detailItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
+        detailItem.add_child(this._alertDetailBox);
+        this._alertItem.menu.addMenuItem(detailItem);
 
-        this._alertItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
-        this._alertItem.add_child(box);
+        this._alertExpandId = this._alertItem.menu.connect('open-state-changed', (menu, open) => {
+            if (open)
+                this._onAlertExpanded();
+        });
+
         this._alertItem.visible = false;
         this._indicator.menu.addMenuItem(this._alertItem);
+    }
+
+    _wrappedAlertLabel(text, styleClass) {
+        const label = new St.Label({ text, style_class: styleClass });
+        label.clutter_text.line_wrap = true;
+        label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+        label.set_width(ALERT_DETAIL_WIDTH);
+        return label;
+    }
+
+    _onAlertExpanded() {
+        if (!this._alertItem || this._alerts.length === 0)
+            return;
+
+        const missing = this._alerts.filter(a => !this._alertDetails.has(a.id));
+        this._renderAlertDetails();
+        for (const alert of missing) {
+            this._alertDetails.set(alert.id, null);
+            this._fetchAlertDetail(alert.id, this._alertGen);
+        }
+    }
+
+    _fetchAlertDetail(alertId, gen) {
+        const message = Soup.Message.new('GET', getCmaAlertDetailUrl(alertId));
+        if (!message)
+            return;
+        this._session.send_and_read_async(
+            message,
+            Soup.MessagePriority.NORMAL,
+            this._cancellable,
+            (session, result) => {
+                try {
+                    const bytes = session.send_and_read_finish(result);
+                    if (!this._enabled || this._cancellable?.is_cancelled())
+                        return;
+                    if (gen !== this._alertGen)
+                        return;
+                    if (message.status_code !== Soup.Status.OK) {
+                        logError(`预警详情 HTTP ${message.status_code}`);
+                        this._alertDetails.set(alertId, ALERT_DETAIL_FAILED);
+                    } else {
+                        this._alertDetails.set(alertId, parseAlertDetail(
+                            JSON.parse(new TextDecoder().decode(bytes.get_data())))
+                            ?? ALERT_DETAIL_FAILED);
+                    }
+                    if (this._alertItem?.menu.isOpen)
+                        this._renderAlertDetails();
+                } catch (e) {
+                    if (!this._enabled)
+                        return;
+                    logError(`预警详情解析失败: ${e}`);
+                    this._alertDetails.set(alertId, ALERT_DETAIL_FAILED);
+                }
+            });
+    }
+
+    _renderAlertDetails() {
+        if (!this._alertDetailBox)
+            return;
+        this._alertDetailBox.destroy_all_children();
+
+        for (const alert of this._alerts) {
+            const box = new St.BoxLayout({
+                orientation: Clutter.Orientation.VERTICAL,
+                style_class: 'climacn-alert-detail'
+            });
+
+            const head = new St.BoxLayout({ style_class: 'climacn-alert-detail-head' });
+            const dot = new St.Widget({
+                style_class: `climacn-alert-dot alert-${alert.level.key}`,
+                y_align: Clutter.ActorAlign.CENTER
+            });
+            head.add_child(dot);
+            head.add_child(this._wrappedAlertLabel(alert.title, 'climacn-alert-detail-title'));
+            box.add_child(head);
+
+            const detail = this._alertDetails.get(alert.id);
+            if (!detail || detail === ALERT_DETAIL_FAILED) {
+                box.add_child(new St.Label({
+                    text: detail === ALERT_DETAIL_FAILED ? _('详情暂时取不到') : _('详情加载中…'),
+                    style_class: 'climacn-alert-detail-pending'
+                }));
+                this._alertDetailBox.add_child(box);
+                continue;
+            }
+
+            if (detail.effective) {
+                box.add_child(new St.Label({
+                    text: `${_('发布时间')} ${detail.effective}`,
+                    style_class: 'climacn-alert-detail-meta'
+                }));
+            }
+            if (detail.description)
+                box.add_child(this._wrappedAlertLabel(detail.description, 'climacn-alert-detail-text'));
+
+            if (detail.guide) {
+                box.add_child(new St.Label({
+                    text: _('防御指南'),
+                    style_class: 'climacn-alert-detail-heading'
+                }));
+                box.add_child(this._wrappedAlertLabel(detail.guide, 'climacn-alert-detail-text'));
+            }
+
+            this._alertDetailBox.add_child(box);
+        }
     }
 
     _loadStationData(callback) {
@@ -1590,7 +1725,7 @@ export default class ClimaCNExtension extends Extension {
             this._stationWaiters = [];
             this._loadingStations = false;
             if (!this._enabled)
-                return;   
+                return;
             try {
                 const [ok, contents] = f.load_contents_finish(result);
                 if (!ok)
@@ -1598,7 +1733,7 @@ export default class ClimaCNExtension extends Extension {
                 this._cmaStations = parseStationList(new TextDecoder().decode(contents));
             } catch (e) {
                 logError(`站点表加载失败: ${e}`);
-                this._cmaStations = [];   
+                this._cmaStations = [];
             }
             for (const fn of waiters) {
                 if (this._enabled)
@@ -1676,29 +1811,45 @@ export default class ClimaCNExtension extends Extension {
             this._alertItem.visible = false;
             return;
         }
-        const top = list[0];   
+        const top = list[0];
         this._alertLabel.text = list.length > 1
             ? `${top.title}（等 ${list.length} 条）`
             : top.title;
         this._alertDot.style_class = `climacn-alert-dot alert-${top.level.key}`;
         this._alertItem.visible = true;
+
+        const sameSet = list.length === this._alertDetails.size &&
+            list.every(a => this._alertDetails.has(a.id));
+        if (!sameSet) {
+            this._alertDetails.clear();
+            this._alertDetailBox?.destroy_all_children();
+            if (this._alertItem.menu.isOpen)
+                this._onAlertExpanded();
+        }
     }
 
     _destroyAlerts() {
-        this._alertItem?.destroy();
-        this._alertItem = null;
-        this._alertLabel?.destroy();
+        if (this._alertExpandId) {
+            this._alertItem?.menu.disconnect(this._alertExpandId);
+            this._alertExpandId = 0;
+        }
         this._alertLabel = null;
         this._alertDot?.destroy();
         this._alertDot = null;
+        this._alertDetailBox?.destroy();
+        this._alertDetailBox = null;
+        this._alertItem?.destroy();
+        this._alertItem = null;
         this._alerts = [];
+        this._alertDetails?.clear();
+        this._alertDetails = null;
     }
 
     _buildHeader() {
         const box = new St.BoxLayout({
             style_class: 'climacn-header-box',
             vertical: true,
-            x_expand: true   
+            x_expand: true
         });
 
         const row = new St.BoxLayout({
@@ -1870,7 +2021,7 @@ export default class ClimaCNExtension extends Extension {
 
     _buildTrendSubmenu() {
         this._trendItem = new PopupMenu.PopupSubMenuMenuItem(_('10 天趋势'), false);
-        this._trendItem.visible = false;   
+        this._trendItem.visible = false;
 
         this._trendArea = new St.DrawingArea({
             style_class: 'climacn-trend-chart',
@@ -2046,7 +2197,7 @@ export default class ClimaCNExtension extends Extension {
 
             if (!col) {
                 const names = cols.map(c => c.trim());
-                if (!names.includes('Location_ID')) continue;   
+                if (!names.includes('Location_ID')) continue;
                 col = {
                     id: names.indexOf('Location_ID'),
                     name: names.indexOf('Location_Name_ZH'),
@@ -2417,7 +2568,7 @@ export default class ClimaCNExtension extends Extension {
             this._cancellable = new Gio.Cancellable();
 
         this._lastFetchAt = GLib.get_monotonic_time() / 1e6;
-        this._errorShown = false;   
+        this._errorShown = false;
 
         const seq = ++this._requestSeq;
 
@@ -2636,8 +2787,8 @@ export default class ClimaCNExtension extends Extension {
             if (radius <= 0)
                 return;
 
-            const start = -Math.PI / 2;    
-            const sweep = Math.PI * 1.5;   
+            const start = -Math.PI / 2;
+            const sweep = Math.PI * 1.5;
 
             cr.setLineWidth(lineWidth);
             cr.setLineCap(Cairo.LineCap.ROUND);
@@ -2707,7 +2858,7 @@ export default class ClimaCNExtension extends Extension {
             if (rx <= 0 || ry <= 0)
                 return;
             const cx = width / 2;
-            const cy = height - pad;   
+            const cy = height - pad;
             const rxAt = ratio => cx + rx * Math.cos(this._arcTheta(ratio));
             const ryAt = ratio => cy + ry * Math.sin(this._arcTheta(ratio));
 
@@ -2793,21 +2944,21 @@ export default class ClimaCNExtension extends Extension {
 
         if (lit > 0.001) {
             cr.save();
-            if (!(phase?.waxing ?? true)) {   
+            if (!(phase?.waxing ?? true)) {
                 cr.translate(cx, cy);
                 cr.scale(-1, 1);
                 cr.translate(-cx, -cy);
             }
             const a = Math.max(Math.abs(1 - 2 * lit), 0.001);
             cr.newSubPath();
-            cr.arc(cx, cy, r, -Math.PI / 2, Math.PI / 2);   
+            cr.arc(cx, cy, r, -Math.PI / 2, Math.PI / 2);
             cr.save();
             cr.translate(cx, cy);
             cr.scale(a, 1);
             if (lit > 0.5)
-                cr.arc(0, 0, r, Math.PI / 2, 3 * Math.PI / 2);       
+                cr.arc(0, 0, r, Math.PI / 2, 3 * Math.PI / 2);
             else
-                cr.arcNegative(0, 0, r, Math.PI / 2, -Math.PI / 2);  
+                cr.arcNegative(0, 0, r, Math.PI / 2, -Math.PI / 2);
             cr.restore();
             cr.closePath();
             cr.setSourceRGBA(fg[0], fg[1], fg[2], MOON_LIT_ALPHA * alpha);
@@ -2881,8 +3032,8 @@ export default class ClimaCNExtension extends Extension {
         if (r <= 0)
             return;
         cr.newSubPath();
-        cr.arc(x + r, y + r, r, Math.PI / 2, Math.PI * 1.5);        
-        cr.arc(x + w - r, y + r, r, -Math.PI / 2, Math.PI / 2);     
+        cr.arc(x + r, y + r, r, Math.PI / 2, Math.PI * 1.5);
+        cr.arc(x + w - r, y + r, r, -Math.PI / 2, Math.PI / 2);
         cr.closePath();
     }
 
@@ -2963,7 +3114,7 @@ export default class ClimaCNExtension extends Extension {
                 return;
             const lo = Math.min(...days.map(p => p.min));
             const hi = Math.max(...days.map(p => p.max));
-            const span = hi - lo || 1;   
+            const span = hi - lo || 1;
 
             const xAt = i => padX + (plotW * i) / (points.length - 1);
             const yAt = v => plotTop + plotH * (1 - (v - lo) / span);

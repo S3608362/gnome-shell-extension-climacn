@@ -207,6 +207,46 @@
 .climacn-alert-dot.alert-orange { background-color: #ff7800; }
 .climacn-alert-dot.alert-red    { background-color: #e01b24; }
 
-.climacn-alert-label {
+.climacn-alert-detail-box {
+  spacing: 4px;
+}
+
+.climacn-alert-detail {
+  spacing: 3px;
+  padding: 4px 0px;
+}
+
+.climacn-alert-detail-head {
+  spacing: 0px;
+}
+
+.climacn-alert-detail-title {
   font-size: 0.85em;
+  font-weight: bold;
+}
+
+.climacn-alert-detail-meta {
+  font-size: 0.75em;
+  opacity: 0.65;
+  padding-left: 16px;
+}
+
+.climacn-alert-detail-text {
+  font-size: 0.8em;
+  opacity: 0.85;
+  padding-left: 16px;
+}
+
+.climacn-alert-detail-heading {
+  font-size: 0.8em;
+  font-weight: bold;
+  opacity: 0.7;
+  padding-left: 16px;
+  padding-top: 2px;
+}
+
+.climacn-alert-detail-pending {
+  font-size: 0.8em;
+  opacity: 0.6;
+  padding-left: 16px;
 }
