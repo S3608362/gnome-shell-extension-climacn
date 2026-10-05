@@ -2,7 +2,7 @@
   "name": "ClimaCN",
   "description": "中国大陆的天气扩展：实时天气、逐日预报、空气质量与日月天文信息。",
   "uuid": "climacn-weather@outlook.com",
-  "shell-version": [ "45", "46", "47", "48", "49", "50" ],
+  "shell-version": [ "45", "46", "47", "48", "49", "50", "51" ],
   "settings-schema": "org.gnome.shell.extensions.climacn-weather@outlook.com",
   "gettext-domain": "climacn-weather@outlook.com",
   "url": "https://github.com/S3608362/gnome-shell-extension-climacn"
