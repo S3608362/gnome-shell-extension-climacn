@@ -40,6 +40,20 @@ const SUN_ARC_HEIGHT = 60;                // 天空弧线的高度（逻辑像�
 const MOON_ARC_HEIGHT = 56;               // 月亮弧线的高度
 const MOON_DISC_RADIUS = 7;               // 弧上月相圆盘的半径（逻辑像素）
 
+/* 太阳弧与月亮弧共用的横向边距。
+ *
+ * 两条弧上各骑着一个装饰物（太阳圆点、月相圆盘），画到弧线两端时它会向外
+ * 超出一个半径，所以左右不能只留线宽，还要加上装饰物的半径，否则圆点/圆盘
+ * 跑到两端会被画布边缘裁掉。
+ *
+ * 取两者中较大的那个半径（月相圆盘），两条弧的左右端点因此落在同一条竖线上；
+ * 各算各的会让月亮弧比太阳弧窄，上下叠着看很明显。 */
+function arcSideInset(lineWidth, scaleFactor) {
+    const lineGap = lineWidth + 3 * scaleFactor;
+    const decorR = Math.max(3.5, 4.5 * scaleFactor, MOON_DISC_RADIUS * scaleFactor);
+    return lineGap + decorR;
+}
+
 /* 天空色阶：夜 → 天文暮光 → 航海暮光 → 民用暮光 → 白天。
  * 三段暮光分别对应太阳位于地平线下 18°~12°、12°~6°、6°~0°，
  * 和风把它们各自的起止时刻都给了，所以色带能落在真实时间上。 */
@@ -1940,9 +1954,18 @@ export default class ClimaCNExtension extends Extension {
         try {
             const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
             const fg = this._themeColor(area);
-            const cellW = width / phases.length;
             const r = Math.max(3, 6 * scaleFactor);
             const cy = r + 2 * scaleFactor;
+
+            /* 横向位置必须与折线用同一套映射：折线是「两端锚点、中间均分」
+             * （见 _drawTrendChart 的 xAt），这里若按格宽取中点，两端会各错开
+             * 半个格宽以上——中间重合、越往两端偏得越多，看上去就是月相没对
+             * 上温度。两处的 width 都取 TREND_CHART_WIDTH，公式一致便完全对齐。 */
+            const padX = 10 * scaleFactor;
+            const step = phases.length > 1
+                ? (width - 2 * padX) / (phases.length - 1)
+                : 0;
+            const cxAt = i => phases.length > 1 ? padX + step * i : width / 2;
 
             const layout = PangoCairo.create_layout(cr);
             let themeFont = null;
@@ -1957,7 +1980,7 @@ export default class ClimaCNExtension extends Extension {
                 const phase = phases[i];
                 if (!phase)
                     continue;
-                const cx = cellW * (i + 0.5);
+                const cx = cxAt(i);
                 this._drawMoonDisc(cr, cx, cy, r, phase, fg, 0.95);
                 cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.6);
                 drawCenteredText(cr, layout, `${Math.round(phase.lit * 100)}%`,
@@ -2827,8 +2850,11 @@ export default class ClimaCNExtension extends Extension {
             /* 用椭圆而不是正圆。正圆的半径被 min(宽/2, 高) 卡死，菜单加宽后
              * 它只会缩在中间一小块，两侧留一大片空白。让横轴铺满可用宽度、
              * 纵轴取高度预算，弧线就随菜单宽度自然变宽，也更接近天气应用里
-             * 那条横向时间轴的形状。 */
-            const rx = (width - 2 * pad) / 2;
+             * 那条横向时间轴的形状。
+             *
+             * 横向用与月亮弧共用的边距（比纵向的 pad 宽，要装下弧端的圆点），
+             * 两条弧的端点才对得齐。纵向的 pad 只管线宽，圆点比它小，够用。 */
+            const rx = (width - 2 * arcSideInset(lineWidth, scaleFactor)) / 2;
             const ry = height - 2 * pad;
             if (rx <= 0 || ry <= 0)
                 return;
@@ -2982,13 +3008,16 @@ export default class ClimaCNExtension extends Extension {
             const lineWidth = Math.max(1.5, 2 * scaleFactor);
             const pad = lineWidth + 3 * scaleFactor;
             const discR = MOON_DISC_RADIUS * scaleFactor;
-            // 与太阳弧线同样用椭圆铺满宽度；圆盘骑在弧上，纵轴要留出它的高度
-            const rx = (width - 2 * pad) / 2;
-            const ry = height - pad - discR - pad;
+            /* 与太阳弧线同样用椭圆铺满宽度。圆盘骑在弧上，四边都要留出它的
+             * 半径：横向的边距由 arcSideInset 统一给出（与太阳弧一致），
+             * 纵向则上下各留一个 discR —— 圆心落在底边上，下缘本来会掉出画布，
+             * 圆盘跑到弧线两端时就会被裁掉一块。 */
+            const rx = (width - 2 * arcSideInset(lineWidth, scaleFactor)) / 2;
+            const ry = height - 2 * pad - 2 * discR;
             if (rx <= 0 || ry <= 0)
                 return;
             const cx = width / 2;
-            const cy = height - pad;
+            const cy = height - pad - discR;
             const fg = this._themeColor(area);
             const pxAt = ratio => cx + rx * Math.cos(this._arcTheta(ratio));
             const pyAt = ratio => cy + ry * Math.sin(this._arcTheta(ratio));
