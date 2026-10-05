@@ -161,8 +161,8 @@ function getForecastUrl(host, lat, lon) {
 
 /* 文档要求经纬度最多两位小数 */
 function formatCoord(value) {
-    const n = Number(value);
-    return Number.isFinite(n) ? n.toFixed(2) : '0.00';
+    const n = toFiniteOrNull(value);
+    return n === null ? '0.00' : n.toFixed(2);
 }
 
 /* API Host 由用户从控制台复制，形如 abcxyz.qweatherapi.com（不含协议）。
@@ -193,8 +193,8 @@ function compassToChinese(code) {
 
 /* v1 的湿度、云量、降水概率都是 0–1 的小数，直接拼 % 会显示成 0.65% */
 function toPercent(value) {
-    const n = Number(value);
-    return Number.isFinite(n) ? `${Math.round(n * 100)}%` : '--%';
+    const n = toFiniteOrNull(value);
+    return n === null ? '--%' : `${Math.round(n * 100)}%`;
 }
 
 /* 温度是浮点数（如 31.7），显示前取整。
@@ -227,8 +227,8 @@ function roundTemp(value) {
 
 /* 其余量值沿用接口给的单位（hPa / km / mm 等），形如 {value, unit} */
 function formatMeasure(obj, fallback = '--') {
-    const n = Number(obj?.value);
-    if (!Number.isFinite(n))
+    const n = toFiniteOrNull(obj?.value);
+    if (n === null)
         return fallback;
     return obj?.unit ? `${Math.round(n)} ${obj.unit}` : `${Math.round(n)}`;
 }
@@ -263,8 +263,9 @@ function parseAqiIndex(json) {
     if (list.length === 0)
         return null;
     const idx = list.find(i => i?.code === 'qaqi') ?? list[0];
-    const aqi = Number(idx?.aqi);
-    if (!Number.isFinite(aqi))
+    // 取不到就整块隐藏色环，不能显示成「0 优」
+    const aqi = toFiniteOrNull(idx?.aqi);
+    if (aqi === null)
         return null;
     const c = idx?.color ?? {};
     const channel = v => (toFiniteOrNull(v) ?? 128);
@@ -278,8 +279,8 @@ function parseAqiIndex(json) {
 
 /* 色环填充比例。国标 300 以上即严重污染，以 300 为满量程。 */
 function aqiFillRatio(aqi) {
-    const n = Number(aqi);
-    if (!Number.isFinite(n))
+    const n = toFiniteOrNull(aqi);
+    if (n === null)
         return 0;
     return Math.min(Math.max(n, 0), 300) / 300;
 }
@@ -347,8 +348,8 @@ function aqiColor(aqi) {
 
 /* 单项 IAQI：在分段表里找到浓度所在区间后线性内插 */
 function iaqiFrom(concentration, table) {
-    const c = Number(concentration);
-    if (!Number.isFinite(c) || c < 0)
+    const c = toFiniteOrNull(concentration);
+    if (c === null || c < 0)
         return null;
     for (let i = 1; i < table.length; i++) {
         if (c <= table[i]) {
@@ -363,9 +364,11 @@ function iaqiFrom(concentration, table) {
 }
 
 function meanOf(values) {
+    /* 缺测的样本必须剔除，不能让它们以 0 的身份混进均值——国标 AQI 是取
+     * 24 小时均值算的，混进几个 0 会把指数算得比实际干净得多。 */
     const nums = (Array.isArray(values) ? values : [])
-        .map(Number)
-        .filter(Number.isFinite);
+        .map(toFiniteOrNull)
+        .filter(v => v !== null);
     if (nums.length === 0)
         return null;
     return nums.reduce((a, b) => a + b, 0) / nums.length;
@@ -478,10 +481,8 @@ function parseClockMinutes(iso) {
 /* 分钟数 → HH:MM。
  * 必须先挡掉 null：Number(null) 是 0 且有限，会被当成 00:00。 */
 function formatClock(minutes) {
-    if (minutes === null || minutes === undefined || minutes === '')
-        return '--:--';
-    const n = Number(minutes);
-    if (!Number.isFinite(n))
+    const n = toFiniteOrNull(minutes);
+    if (n === null)
         return '--:--';
     const h = Math.floor(n / 60) % 24;
     const m = Math.round(n % 60);
@@ -523,13 +524,14 @@ function parseMoon(astro) {
 
     /* Open-Meteo 额外给出连续的照亮比例（moonLit），比八相名的步进更准，
      * 有就覆盖 lit；中文名与盈亏方向仍由八相名决定，两个源下文字一致。 */
-    const lit = Number(astro?.moonLit);
+    const lit = toFiniteOrNull(astro?.moonLit);
     return {
         moonrise, moonset,
         phase: {
             name: base.name,
             waxing: base.waxing,
-            lit: Number.isFinite(lit) ? lit : base.lit,
+            // 取不到连续照亮比例时退回八相名的步进值，不能当成 0（新月）
+            lit: lit ?? base.lit,
         },
     };
 }
@@ -690,14 +692,18 @@ const WMO_TEXT_ZH = {
 };
 
 function wmoToQweatherCode(code, isDay = true) {
-    const c = Number(code);
+    // 取不到要给未知图标：Number(null) 是 0，而 0 是「晴」，会凭空报个大太阳
+    const c = toFiniteOrNull(code);
+    if (c === null)
+        return '999';
     if (!isDay && WMO_TO_QWEATHER_NIGHT[c])
         return WMO_TO_QWEATHER_NIGHT[c];
     return WMO_TO_QWEATHER_DAY[c] ?? '999';
 }
 
 function wmoToText(code) {
-    return WMO_TEXT_ZH[Number(code)] ?? '--';
+    const c = toFiniteOrNull(code);
+    return c === null ? '--' : (WMO_TEXT_ZH[c] ?? '--');
 }
 
 const COMPASS_CODES = ['n', 'nne', 'ne', 'ene', 'e', 'ese', 'se', 'sse',
@@ -705,8 +711,8 @@ const COMPASS_CODES = ['n', 'nne', 'ne', 'ene', 'e', 'ese', 'se', 'sse',
 
 /* Open-Meteo 给的是风向角度，和风给的是方位代码，这里换算过去 */
 function degreesToCompass(degrees) {
-    const d = Number(degrees);
-    if (!Number.isFinite(d))
+    const d = toFiniteOrNull(degrees);
+    if (d === null)
         return 'none';
     const normalized = ((d % 360) + 360) % 360;
     return COMPASS_CODES[Math.round(normalized / 22.5) % 16];
@@ -718,8 +724,8 @@ const BEAUFORT_MAX_MS = [0.2, 1.5, 3.3, 5.4, 7.9, 10.7, 13.8, 17.1,
                          20.7, 24.4, 28.4, 32.6];
 
 function beaufortFromMs(ms) {
-    const v = Number(ms);
-    if (!Number.isFinite(v) || v < 0)
+    const v = toFiniteOrNull(ms);
+    if (v === null || v < 0)
         return null;
     for (let i = 0; i < BEAUFORT_MAX_MS.length; i++) {
         if (v <= BEAUFORT_MAX_MS[i])
@@ -824,8 +830,8 @@ const MOON_PHASE_CENTERS = [
 ];
 
 function moonPhaseFromFraction(p) {
-    const v = Number(p);
-    if (!Number.isFinite(v))
+    const v = toFiniteOrNull(p);
+    if (v === null)
         return null;
     const f = ((v % 1) + 1) % 1;
     let name = MOON_PHASE_CENTERS[0][0];
@@ -2165,10 +2171,11 @@ export default class ClimaCNExtension extends Extension {
             const name = cols[col.name].trim();
             const adm1 = cols[col.adm1].trim();
             const adm2 = col.adm2 < 0 ? '' : cols[col.adm2].trim();
-            const lat = Number(cols[col.lat]);
-            const lon = Number(cols[col.lon]);
+            // 空字段要丢掉：Number('') 是 0，会让这座城市落在几内亚湾 (0,0)
+            const lat = toFiniteOrNull(cols[col.lat]);
+            const lon = toFiniteOrNull(cols[col.lon]);
             if (!name || !adm1) continue;
-            if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+            if (lat === null || lon === null) continue;
             cities.push({ id, name, adm1, adm2, lat, lon });
         }
         this._cityData = cities;
@@ -3332,10 +3339,11 @@ export default class ClimaCNExtension extends Extension {
 
         // ---- 折叠区数据 ----
         // 气压趋势：接口只给当前值，趋势要靠本地按时间累积采样后自行比较
-        const pressureValue = Number(now.pressure?.value);
+        const pressureValue = toFiniteOrNull(now.pressure?.value);
         const nowSec = Math.floor(Date.now() / 1000);
         let trendText = '';
-        if (Number.isFinite(pressureValue)) {
+        // 取不到气压时不要采样：混进一个 0 hPa 会把整条趋势线带偏
+        if (pressureValue !== null) {
             this._pressureHistory = appendPressureSample(this._pressureHistory, nowSec, pressureValue);
             this._settings.set_string('pressure-history', JSON.stringify(this._pressureHistory));
             trendText = formatPressureTrend(
@@ -3475,9 +3483,10 @@ export default class ClimaCNExtension extends Extension {
 
                 /* 温度条：位置与长度表示当天温区在未来 10 天里的相对冷暖。
                  * 数据缺失时放一个弹性空白，保证各行的状况文字仍然对齐。 */
-                const dayMin = Number(day.temperatureMin?.value);
-                const dayMax = Number(day.temperatureMax?.value);
-                if (Number.isFinite(dayMin) && Number.isFinite(dayMax)) {
+                const dayMin = toFiniteOrNull(day.temperatureMin?.value);
+                const dayMax = toFiniteOrNull(day.temperatureMax?.value);
+                // 缺数据的那天不画条（否则会画到 0℃ 的位置），留同宽占位
+                if (dayMin !== null && dayMax !== null) {
                     row.add_child(this._createTempBar(
                         { min: dayMin, max: dayMax, lo: barLo, hi: barHi }));
                 } else {
