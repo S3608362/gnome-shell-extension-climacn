@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/github/license/S3608362/gnome-shell-extension-climacn)
 ![Top Language](https://img.shields.io/github/languages/top/S3608362/gnome-shell-extension-climacn)
 ![GitHub Release](https://img.shields.io/github/v/release/S3608362/gnome-shell-extension-climacn)
-![GNOME Shell](https://img.shields.io/badge/GNOME%20Shell-45%20to%2050-blue)
+![GNOME Shell](https://img.shields.io/badge/GNOME%20Shell-45%20to%2051-blue)
 ![Data Source](https://img.shields.io/badge/Data-QWeather%20%2B%20Open--Meteo-blue)
 
 **国内 GNOME 用户一直缺少一个精准的天气扩展。**
@@ -48,6 +48,8 @@ ClimaCN 内置全国城市数据库，支持自定义 API Host，图标完美适
 </p>
 
 ## 📦 安装方法
+
+支持 GNOME Shell 45 – 51。
 
 ### 安装
 
