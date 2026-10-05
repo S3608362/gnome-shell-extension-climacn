@@ -199,9 +199,30 @@ function toPercent(value) {
 
 /* 温度是浮点数（如 31.7），显示前取整。
  * 统一显示为 22°，不跟随接口返回的 "c" 单位，避免与 °C 混用。 */
-function roundTemp(value) {
+/* 转成有限数，取不到时返回 null。
+ *
+ * 必须显式挡掉 null / undefined / 空串，不能只靠 Number + isFinite 判断：
+ * Number(null) 和 Number('') 都等于 0，而 0 是有限数，于是「没有数据」
+ * 会被当成一个真实的读数 0——温度显示成 0℃、月出算成 00:00、
+ * 温度轴被 0 拉起来把真正的起伏压平。 */
+function toFiniteOrNull(value) {
+    if (value === null || value === undefined)
+        return null;
+    if (typeof value === 'string') {
+        // 空白串也要挡：Number('  ') 同样是 0
+        if (value.trim() === '')
+            return null;
+    } else if (typeof value !== 'number') {
+        // 数组、对象等非数值一律视为没有数据（Number([]) 也是 0）
+        return null;
+    }
     const n = Number(value);
-    return Number.isFinite(n) ? `${Math.round(n)}°` : '--°';
+    return Number.isFinite(n) ? n : null;
+}
+
+function roundTemp(value) {
+    const n = toFiniteOrNull(value);
+    return n === null ? '--°' : `${Math.round(n)}°`;
 }
 
 /* 其余量值沿用接口给的单位（hPa / km / mm 等），形如 {value, unit} */
@@ -246,7 +267,7 @@ function parseAqiIndex(json) {
     if (!Number.isFinite(aqi))
         return null;
     const c = idx?.color ?? {};
-    const channel = v => (Number.isFinite(Number(v)) ? Number(v) : 128);
+    const channel = v => (toFiniteOrNull(v) ?? 128);
     return {
         aqi,
         display: idx?.aqiDisplay || String(Math.round(aqi)),
@@ -407,8 +428,8 @@ function parsePressureHistory(raw) {
         if (!Array.isArray(arr))
             return [];
         return arr
-            .filter(e => Number.isFinite(Number(e?.t)) && Number.isFinite(Number(e?.p)))
-            .map(e => ({ t: Number(e.t), p: Number(e.p) }))
+            .map(e => ({ t: toFiniteOrNull(e?.t), p: toFiniteOrNull(e?.p) }))
+            .filter(e => e.t !== null && e.p !== null)
             .sort((a, b) => a.t - b.t);
     } catch (_e) {
         return [];   // 数据损坏时按空历史处理，不影响主流程
@@ -614,16 +635,28 @@ function parseMoonPhases(days) {
     return days.map(d => MOON_PHASES[d?.astro?.moonPhase] ?? null);
 }
 
-/* 折线取值：每天的最高/最低温。缺数据的日子跳过。 */
+/* 折线取值：每天的最高/最低温。缺数据的那天留成 null 占位。
+ *
+ * 不能直接把缺数据的天过滤掉——下方的月相条是按同一天序逐格画的
+ * （parseMoonPhases 保留 null 占位），这里一旦少一格，后面的天就全部
+ * 与月相错开，而两处都以为自己在按 forecast 的下标画。 */
 function parseTrendPoints(days) {
     if (!Array.isArray(days))
         return [];
-    return days
-        .map(d => ({
-            min: Number(d?.temperatureMin?.value),
-            max: Number(d?.temperatureMax?.value),
-        }))
-        .filter(p => Number.isFinite(p.min) && Number.isFinite(p.max));
+    return days.map(d => {
+        const rawMin = d?.temperatureMin?.value;
+        const rawMax = d?.temperatureMax?.value;
+        /* 必须先挡掉 null/undefined 再转换：Number(null) 是 0 且有限，
+         * 会把这个缺口当成一个「0℃ 的有效数据点」，不但画出一条不存在的
+         * 0 度线，还会把整张图的温度轴从 0 拉起来，把真正的起伏压平。
+         * （同一个坑 formatClock 那里也踩过。） */
+        if (rawMin === null || rawMin === undefined ||
+            rawMax === null || rawMax === undefined)
+            return null;
+        const min = Number(rawMin);
+        const max = Number(rawMax);
+        return Number.isFinite(min) && Number.isFinite(max) ? { min, max } : null;
+    });
 }
 
 /* =====================================================================
@@ -750,7 +783,7 @@ function openMeteoAsQweatherCurrent(json, nowIso) {
     const hourly = json?.hourly ?? {};
     const hi = lastHourlyIndex(hourly.time, nowIso);
     const at = key => (hi >= 0 && Array.isArray(hourly[key]) ? hourly[key][hi] : null);
-    const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
+    const num = v => toFiniteOrNull(v);
     const humidity = num(cur.relative_humidity_2m);
     const cloud = num(cur.cloud_cover);
 
@@ -817,7 +850,7 @@ function moonPhaseFromFraction(p) {
 function openMeteoAsQweatherDaily(json) {
     const d = json?.daily ?? {};
     const times = Array.isArray(d.time) ? d.time : [];
-    const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
+    const num = v => toFiniteOrNull(v);
     return times.map((date, i) => {
         const phase = moonPhaseFromFraction(d.moon_phase?.[i]);
         return {
@@ -3150,14 +3183,33 @@ export default class ClimaCNExtension extends Extension {
             if (plotW <= 0 || plotH <= 0)
                 return;
 
-            const lows = points.map(p => p.min);
-            const highs = points.map(p => p.max);
-            const lo = Math.min(...lows);
-            const hi = Math.max(...highs);
+            /* 缺数据的天在数组里是 null（见 parseTrendPoints），先把它们剔出
+             * 温标计算，否则 Math.min 会被 NaN 污染，整条折线都画不出来。 */
+            const days = points.filter(Boolean);
+            if (days.length < 2)
+                return;
+            const lo = Math.min(...days.map(p => p.min));
+            const hi = Math.max(...days.map(p => p.max));
             const span = hi - lo || 1;   // 全平的时候避免除零
 
+            /* 横坐标按完整天序算，而不是按有效天数算：下方的月相条逐格对应
+             * forecast，两处必须共用同一套下标，否则一有缺口就又错开了。 */
             const xAt = i => padX + (plotW * i) / (points.length - 1);
             const yAt = v => plotTop + plotH * (1 - (v - lo) / span);
+
+            /* 把连续有效的天切成段。缺口处断开，不跨越没有数据的天连线——
+             * 跨过去等于凭空画出一段并不存在的走势。 */
+            const segments = [];
+            let seg = null;
+            for (let i = 0; i < points.length; i++) {
+                if (points[i]) {
+                    if (!seg)
+                        segments.push(seg = []);
+                    seg.push(i);
+                } else {
+                    seg = null;
+                }
+            }
 
             const HIGH = [...COLOR_HIGH, 0.95];
             const LOW = [...COLOR_LOW, 0.95];
@@ -3166,12 +3218,14 @@ export default class ClimaCNExtension extends Extension {
              * 分两层：高温线与低温线之间是昼夜温区；低温线以下再做一层
              * 向下淡出的底色，两条线才不会显得悬空。 */
             cr.newSubPath();
-            cr.moveTo(xAt(0), yAt(highs[0]));
-            for (let i = 1; i < highs.length; i++)
-                cr.lineTo(xAt(i), yAt(highs[i]));
-            for (let i = lows.length - 1; i >= 0; i--)
-                cr.lineTo(xAt(i), yAt(lows[i]));
-            cr.closePath();
+            for (const s of segments) {
+                cr.moveTo(xAt(s[0]), yAt(points[s[0]].max));
+                for (const i of s)
+                    cr.lineTo(xAt(i), yAt(points[i].max));
+                for (let k = s.length - 1; k >= 0; k--)
+                    cr.lineTo(xAt(s[k]), yAt(points[s[k]].min));
+                cr.closePath();
+            }
             // 纵向就是温度轴，同样用色阶；上暖下冷，位置要反过来
             const bandGrad = new Cairo.LinearGradient(0, plotTop, 0, plotBottom);
             for (const [off, r, g, b] of TEMP_RAMP)
@@ -3180,39 +3234,35 @@ export default class ClimaCNExtension extends Extension {
             cr.fill();
 
             cr.newSubPath();
-            cr.moveTo(xAt(0), yAt(lows[0]));
-            for (let i = 1; i < lows.length; i++)
-                cr.lineTo(xAt(i), yAt(lows[i]));
-            cr.lineTo(xAt(lows.length - 1), plotBottom);
-            cr.lineTo(xAt(0), plotBottom);
-            cr.closePath();
+            for (const s of segments) {
+                cr.moveTo(xAt(s[0]), yAt(points[s[0]].min));
+                for (const i of s)
+                    cr.lineTo(xAt(i), yAt(points[i].min));
+                cr.lineTo(xAt(s[s.length - 1]), plotBottom);
+                cr.lineTo(xAt(s[0]), plotBottom);
+                cr.closePath();
+            }
             const groundGrad = new Cairo.LinearGradient(0, plotTop, 0, plotBottom);
             groundGrad.addColorStopRGBA(0, COLOR_LOW[0], COLOR_LOW[1], COLOR_LOW[2], 0.18);
             groundGrad.addColorStopRGBA(1, COLOR_LOW[0], COLOR_LOW[1], COLOR_LOW[2], 0.0);
             cr.setSource(groundGrad);
             cr.fill();
 
-            const polyline = (values, rgba) => {
+            const polyline = (key, rgba) => {
                 cr.setSourceRGBA(rgba[0], rgba[1], rgba[2], rgba[3]);
                 cr.setLineWidth(Math.max(1.2, 1.6 * scaleFactor));
                 cr.setLineJoin(Cairo.LineJoin.ROUND);
-                cr.moveTo(xAt(0), yAt(values[0]));
-                for (let i = 1; i < values.length; i++)
-                    cr.lineTo(xAt(i), yAt(values[i]));
+                cr.newSubPath();
+                for (const s of segments) {
+                    cr.moveTo(xAt(s[0]), yAt(points[s[0]][key]));
+                    for (const i of s)
+                        cr.lineTo(xAt(i), yAt(points[i][key]));
+                }
                 cr.stroke();
             };
 
-            polyline(highs, HIGH);
-            polyline(lows, LOW);
-
-            // 数据点
-            for (const [values, rgba] of [[highs, HIGH], [lows, LOW]]) {
-                cr.setSourceRGBA(rgba[0], rgba[1], rgba[2], 1);
-                for (let i = 0; i < values.length; i++) {
-                    cr.arc(xAt(i), yAt(values[i]), dotR, 0, 2 * Math.PI);
-                    cr.fill();
-                }
-            }
+            polyline('max', HIGH);
+            polyline('min', LOW);
 
             // 数字标注与折线同色，读起来能直接对应到是哪条线
             const layout = PangoCairo.create_layout(cr);
@@ -3224,13 +3274,24 @@ export default class ClimaCNExtension extends Extension {
             }
             layout.set_font_description(cairoFontDescription(themeFont, TREND_LABEL_PX, scaleFactor));
 
-            for (let i = 0; i < points.length; i++) {
-                cr.setSourceRGBA(HIGH[0], HIGH[1], HIGH[2], 0.95);
-                drawCenteredText(cr, layout, `${Math.round(highs[i])}°`,
-                                 xAt(i), yAt(highs[i]) - dotR - labelH / 2);
-                cr.setSourceRGBA(LOW[0], LOW[1], LOW[2], 0.95);
-                drawCenteredText(cr, layout, `${Math.round(lows[i])}°`,
-                                 xAt(i), yAt(lows[i]) + dotR + labelH / 2);
+            // 数据点与数字只落在有效的天上，缺口处留空
+            for (const s of segments) {
+                for (const i of s) {
+                    const p = points[i];
+                    cr.setSourceRGBA(HIGH[0], HIGH[1], HIGH[2], 1);
+                    cr.arc(xAt(i), yAt(p.max), dotR, 0, 2 * Math.PI);
+                    cr.fill();
+                    cr.setSourceRGBA(LOW[0], LOW[1], LOW[2], 1);
+                    cr.arc(xAt(i), yAt(p.min), dotR, 0, 2 * Math.PI);
+                    cr.fill();
+
+                    cr.setSourceRGBA(HIGH[0], HIGH[1], HIGH[2], 0.95);
+                    drawCenteredText(cr, layout, `${Math.round(p.max)}°`,
+                                     xAt(i), yAt(p.max) - dotR - labelH / 2);
+                    cr.setSourceRGBA(LOW[0], LOW[1], LOW[2], 0.95);
+                    drawCenteredText(cr, layout, `${Math.round(p.min)}°`,
+                                     xAt(i), yAt(p.min) + dotR + labelH / 2);
+                }
             }
         } finally {
             cr.$dispose();
@@ -3287,8 +3348,8 @@ export default class ClimaCNExtension extends Extension {
         this._visibilityLabel.text = formatMeasure(now.visibility);
         this._dewPointLabel.text   = roundTemp(now.dewPoint?.value);
         this._cloudCoverLabel.text = toPercent(now.cloudCover);
-        this._uvIndexLabel.text    = Number.isFinite(Number(now.uvIndex))
-            ? `${Math.round(Number(now.uvIndex))}` : '--';
+        const uvIndex = toFiniteOrNull(now.uvIndex);
+        this._uvIndexLabel.text    = uvIndex === null ? '--' : `${Math.round(uvIndex)}`;
         this._windGustLabel.text   = formatMeasure(now.windGust);
         this._precipLabel.text     = formatMeasure(now.precipitation?.amount);
 
@@ -3346,7 +3407,8 @@ export default class ClimaCNExtension extends Extension {
         // ---- 10 天趋势折线 + 逐日月相（收在子菜单里）----
         this._trendPoints = parseTrendPoints(forecast);
         this._moonPhases = parseMoonPhases(forecast);
-        const showTrend = this._trendPoints.length >= 2;
+        // 数组里可能夹着 null 占位，要按有效天数判断，而不是数组长度
+        const showTrend = this._trendPoints.filter(Boolean).length >= 2;
         if (this._trendItem) {
             this._trendItem.visible = showTrend;
             if (showTrend) {
@@ -3361,10 +3423,11 @@ export default class ClimaCNExtension extends Extension {
 
             /* 温度条的归一化区间取整个 10 天，而不是逐日各画各的——
              * 用同一个基准，行与行之间才能横向比较冷暖。 */
-            const lowsAll = forecast.map(d => Number(d.temperatureMin?.value))
-                                    .filter(Number.isFinite);
-            const highsAll = forecast.map(d => Number(d.temperatureMax?.value))
-                                     .filter(Number.isFinite);
+            // 走 toFiniteOrNull：缺数据的天若被当成 0℃，整条温度条的基准会被拉到 0
+            const lowsAll = forecast.map(d => toFiniteOrNull(d.temperatureMin?.value))
+                                    .filter(v => v !== null);
+            const highsAll = forecast.map(d => toFiniteOrNull(d.temperatureMax?.value))
+                                     .filter(v => v !== null);
             const barLo = lowsAll.length ? Math.min(...lowsAll) : 0;
             const barHi = highsAll.length ? Math.max(...highsAll) : 1;
             for (let i = 0; i < count; i++) {
