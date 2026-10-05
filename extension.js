@@ -32,6 +32,7 @@ const BAND_KNOB_R = 5;
 const BAND_NOW_W = 3;
 const BAND_NOW_H = 22;
 const BAND_STOPS = 96;
+const BAND_RAMP = 0.16;
 const DAY_MINUTES = 24 * 60;
 const MOON_DISC_RADIUS = 7;
 
@@ -40,6 +41,27 @@ function bandRatio(minutes) {
     if (m === null)
         return null;
     return Math.min(Math.max(m / DAY_MINUTES, 0), 1);
+}
+
+function bandSkyColorAt(ratio, astro) {
+    const sunrise = astro.sunrise / DAY_MINUTES;
+    const sunset = astro.sunset / DAY_MINUTES;
+    if (ratio >= sunrise && ratio <= sunset)
+        return SKY_DAY;
+
+    const d = ratio < sunrise ? sunrise - ratio : ratio - sunset;
+    const last = BAND_RAMP_COLORS.length - 1;
+    const scaled = Math.min(d / BAND_RAMP, 1) * last;
+    const i = Math.min(Math.floor(scaled), last - 1);
+    const f = scaled - i;
+    const a = BAND_RAMP_COLORS[i];
+    const b = BAND_RAMP_COLORS[i + 1];
+    const e = f * f * (3 - 2 * f);
+    return [
+        a[0] + (b[0] - a[0]) * e,
+        a[1] + (b[1] - a[1]) * e,
+        a[2] + (b[2] - a[2]) * e,
+    ];
 }
 
 function moonUpSpans(moon) {
@@ -57,10 +79,13 @@ const SKY_NAUTICAL  = [0.30, 0.38, 0.68];
 const SKY_CIVIL     = [0.58, 0.52, 0.76];
 const SKY_DAY       = [1.00, 0.72, 0.20];
 
-const BAND_LEVEL_COLORS = {
-    astro: SKY_ASTRONOMY,
-    civil: SKY_CIVIL,
-    day:   SKY_DAY,
+const BAND_RAMP_COLORS = [SKY_DAY, SKY_CIVIL, SKY_NAUTICAL, SKY_ASTRONOMY];
+
+const BAND_DOT_COLORS = {
+    astro: [0.3608, 0.4000, 0.6902],
+    civil: [0.6353, 0.5843, 0.8000],
+    day:   [1.0000, 0.7216, 0.2000],
+    moon:  [0.6039, 0.6000, 0.6588],
 };
 
 const SUN_LEGEND = [
@@ -459,38 +484,6 @@ function parseAstro(days) {
         astronomicalDusk: parseClockMinutes(astro.astronomicalDusk),
         moon: parseMoon(astro),
     };
-}
-
-function skyColorAt(minutes, astro) {
-    const nodes = [
-        [astro.astronomicalDawn, SKY_ASTRONOMY],
-        [astro.nauticalDawn,     SKY_NAUTICAL],
-        [astro.civilDawn,        SKY_CIVIL],
-        [astro.sunrise,          SKY_DAY],
-        [astro.sunset,           SKY_DAY],
-        [astro.civilDusk,        SKY_CIVIL],
-        [astro.nauticalDusk,     SKY_NAUTICAL],
-        [astro.astronomicalDusk, SKY_ASTRONOMY],
-    ].filter(e => e[0] !== null && e[0] !== undefined)
-     .sort((a, b) => a[0] - b[0]);
-
-    if (nodes.length === 0)
-        return SKY_DAY;
-    if (minutes <= nodes[0][0])
-        return nodes[0][1];
-    for (let i = 1; i < nodes.length; i++) {
-        const [m1, c1] = nodes[i - 1];
-        const [m2, c2] = nodes[i];
-        if (minutes <= m2) {
-            const k = m2 > m1 ? (minutes - m1) / (m2 - m1) : 1;
-            return [
-                c1[0] + (c2[0] - c1[0]) * k,
-                c1[1] + (c2[1] - c1[1]) * k,
-                c1[2] + (c2[2] - c1[2]) * k,
-            ];
-        }
-    }
-    return nodes[nodes.length - 1][1];
 }
 
 function moonArcPosition(nowMinutes, moon) {
@@ -2888,7 +2881,7 @@ export default class ClimaCNExtension extends Extension {
             const grad = new Cairo.LinearGradient(0, 0, width, 0);
             for (let i = 0; i <= BAND_STOPS; i++) {
                 const t = i / BAND_STOPS;
-                const c = skyColorAt(t * DAY_MINUTES, astro);
+                const c = bandSkyColorAt(t, astro);
                 grad.addColorStopRGBA(t, c[0], c[1], c[2], 1);
             }
             cr.setSource(grad);
@@ -2907,7 +2900,7 @@ export default class ClimaCNExtension extends Extension {
                 const r = bandRatio(astro[ev.field]);
                 if (r === null)
                     continue;
-                const color = BAND_LEVEL_COLORS[ev.key];
+                const color = BAND_DOT_COLORS[ev.key];
                 const x = r * width;
                 cr.setSourceRGBA(color[0], color[1], color[2], 1);
                 cr.arc(x, cy, knobR, 0, 2 * Math.PI);
@@ -2999,15 +2992,16 @@ export default class ClimaCNExtension extends Extension {
             cr.stroke();
 
             const knobR = BAND_KNOB_R * scaleFactor;
+            const knobColor = BAND_DOT_COLORS.moon;
             for (const m of [moon.moonrise, moon.moonset % DAY_MINUTES]) {
                 const r = bandRatio(m);
                 if (r === null)
                     continue;
                 const x = r * width;
-                cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.95);
+                cr.setSourceRGBA(knobColor[0], knobColor[1], knobColor[2], 1);
                 cr.arc(x, cy, knobR, 0, 2 * Math.PI);
                 cr.fill();
-                cr.setSourceRGBA(1, 1, 1, 0.5);
+                cr.setSourceRGBA(1, 1, 1, 0.75);
                 cr.setLineWidth(Math.max(1.2, 1.6 * scaleFactor));
                 cr.arc(x, cy, knobR, 0, 2 * Math.PI);
                 cr.stroke();
