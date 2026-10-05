@@ -1605,6 +1605,7 @@ export default class ClimaCNExtension extends Extension {
 
     _wrappedAlertLabel(text, styleClass) {
         const label = new St.Label({ text, style_class: styleClass });
+        label.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
         label.clutter_text.line_wrap = true;
         label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
         label.set_width(ALERT_DETAIL_WIDTH);
