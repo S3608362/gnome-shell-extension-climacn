@@ -57,23 +57,47 @@
 
 .climacn-sun-arc {
   margin: 4px 0px 0px 0px;
-  spacing: 8px;
-}
-
-.climacn-sun-time {
-  font-size: 0.8em;
-  opacity: 0.75;
-  font-feature-settings: 'tnum';
+  spacing: 6px;
 }
 
 .climacn-moon-arc {
   margin: 2px 0px 0px 0px;
+  spacing: 6px;
 }
 
-.climacn-moon-phase {
-  font-size: 0.75em;
-  opacity: 0.65;
-  margin-bottom: 2px;
+.climacn-band-legend {
+  spacing: 4px;
+}
+
+.climacn-band-legend-item {
+  spacing: 1px;
+}
+
+.climacn-band-legend-head {
+  spacing: 4px;
+}
+
+.climacn-band-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 3px;
+  margin-top: 1px;
+}
+
+.climacn-band-dot-astro { background-color: #5c66b0; }
+.climacn-band-dot-civil { background-color: #a295cc; }
+.climacn-band-dot-day   { background-color: #ffb833; }
+.climacn-band-dot-moon  { background-color: #9a99a8; }
+
+.climacn-band-legend-label {
+  font-size: 0.72em;
+  opacity: 0.75;
+}
+
+.climacn-band-legend-time {
+  font-size: 0.78em;
+  font-weight: bold;
+  font-feature-settings: 'tnum';
 }
 
 .climacn-trend-box {

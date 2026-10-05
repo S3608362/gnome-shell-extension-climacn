@@ -26,20 +26,57 @@ const FORECAST_ROWS = 3;
 
 const CALENDAR_COLS = 4;
 
-const SUN_ARC_HEIGHT = 60;
-const MOON_ARC_HEIGHT = 56;
+const BAND_HEIGHT = 34;
+const BAND_RADIUS = 6;
+const BAND_KNOB_R = 5;
+const BAND_NOW_W = 3;
+const BAND_NOW_H = 22;
+const BAND_STOPS = 96;
+const DAY_MINUTES = 24 * 60;
 const MOON_DISC_RADIUS = 7;
 
-function arcSideInset(lineWidth, scaleFactor) {
-    const lineGap = lineWidth + 3 * scaleFactor;
-    const decorR = Math.max(3.5, 4.5 * scaleFactor, MOON_DISC_RADIUS * scaleFactor);
-    return lineGap + decorR;
+function bandRatio(minutes) {
+    const m = toFiniteOrNull(minutes);
+    if (m === null)
+        return null;
+    return Math.min(Math.max(m / DAY_MINUTES, 0), 1);
+}
+
+function moonUpSpans(moon) {
+    const spans = [];
+    const end = Math.min(moon.moonset, DAY_MINUTES);
+    if (end > moon.moonrise)
+        spans.push([moon.moonrise, end]);
+    if (moon.moonset > DAY_MINUTES)
+        spans.push([0, moon.moonset - DAY_MINUTES]);
+    return spans;
 }
 
 const SKY_ASTRONOMY = [0.22, 0.26, 0.52];
 const SKY_NAUTICAL  = [0.30, 0.38, 0.68];
 const SKY_CIVIL     = [0.58, 0.52, 0.76];
 const SKY_DAY       = [1.00, 0.72, 0.20];
+
+const BAND_LEVEL_COLORS = {
+    astro: SKY_ASTRONOMY,
+    civil: SKY_CIVIL,
+    day:   SKY_DAY,
+};
+
+const SUN_LEGEND = [
+    { key: 'astro', label: '天文晨', field: 'astronomicalDawn' },
+    { key: 'civil', label: '民用晨', field: 'civilDawn' },
+    { key: 'day',   label: '日出',   field: 'sunrise' },
+    { key: 'day',   label: '日落',   field: 'sunset' },
+    { key: 'civil', label: '民用暮', field: 'civilDusk' },
+    { key: 'astro', label: '天文暮', field: 'astronomicalDusk' },
+];
+
+const MOON_LEGEND = [
+    { key: 'moon', label: '月出' },
+    { key: 'moon', label: '月落' },
+    { key: 'moon', label: '月相' },
+];
 
 const MOON_LIT_ALPHA = 0.85;
 const MOON_DARK_ALPHA = 0.16;
@@ -421,24 +458,6 @@ function parseAstro(days) {
         astronomicalDawn: parseClockMinutes(astro.astronomicalDawn),
         astronomicalDusk: parseClockMinutes(astro.astronomicalDusk),
         moon: parseMoon(astro),
-    };
-}
-
-function sunArcSpan(astro) {
-    const { astronomicalDawn: a, astronomicalDusk: b, sunrise, sunset } = astro;
-    if (a !== null && b !== null && b > a)
-        return { start: a, end: b, hasTwilight: true };
-    return { start: sunrise, end: sunset, hasTwilight: false };
-}
-
-function sunArcPosition(nowMinutes, astro) {
-    if (!astro)
-        return null;
-    const { start, end } = sunArcSpan(astro);
-    const ratio = (nowMinutes - start) / (end - start);
-    return {
-        ratio: Math.min(Math.max(ratio, 0), 1),
-        isDay: nowMinutes >= astro.sunrise && nowMinutes <= astro.sunset,
     };
 }
 
@@ -901,7 +920,9 @@ export default class ClimaCNExtension extends Extension {
         this._pressureHistory = parsePressureHistory(this._settings.get_string('pressure-history'));
         this._aqi = null;
         this._aqiFailCount = 0;
-        this._sunPosition = null;
+        this._nowMinutes = 0;
+        this._sunLegendLabels = [];
+        this._moonLegendLabels = [];
         this._astro = null;
         this._moonPosition = null;
         this._trendPoints = [];
@@ -1138,7 +1159,9 @@ export default class ClimaCNExtension extends Extension {
         this._aqi = null;
         this._aqiFailCount = 0;
         this._pressureHistory = [];
-        this._sunPosition = null;
+        this._nowMinutes = 0;
+        this._sunLegendLabels = [];
+        this._moonLegendLabels = [];
         this._astro = null;
         this._moonPosition = null;
         this._trendPoints = [];
@@ -1204,23 +1227,15 @@ export default class ClimaCNExtension extends Extension {
 
         this._destroyAlerts();
 
-        this._sunriseLabel?.destroy();
-        this._sunriseLabel = null;
         this._sunArcArea?.destroy();
         this._sunArcArea = null;
-        this._sunsetLabel?.destroy();
-        this._sunsetLabel = null;
+        this._sunLegendLabels = [];
         this._sunArcItem?.destroy();
         this._sunArcItem = null;
 
-        this._moonriseLabel?.destroy();
-        this._moonriseLabel = null;
         this._moonArcArea?.destroy();
         this._moonArcArea = null;
-        this._moonsetLabel?.destroy();
-        this._moonsetLabel = null;
-        this._moonPhaseLabel?.destroy();
-        this._moonPhaseLabel = null;
+        this._moonLegendLabels = [];
         this._moonArcItem?.destroy();
         this._moonArcItem = null;
 
@@ -1489,91 +1504,85 @@ export default class ClimaCNExtension extends Extension {
         this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         this._buildDetails();
-        this._buildSunArc();
-        this._buildMoonArc();
+        this._buildSunBand();
+        this._buildMoonBand();
         this._buildForecast();
         this._buildFooter();
     }
 
-    _buildSunArc() {
-        const box = new St.BoxLayout({
-            style_class: 'climacn-sun-arc',
-            y_align: Clutter.ActorAlign.CENTER,
+    _buildLegendItem(spec, legend) {
+        const item = new St.BoxLayout({
+            style_class: 'climacn-band-legend-item',
+            vertical: true,
             x_expand: true
         });
-
-        this._sunriseLabel = new St.Label({
+        const head = new St.BoxLayout({ style_class: 'climacn-band-legend-head' });
+        head.add_child(new St.Widget({
+            style_class: `climacn-band-dot climacn-band-dot-${spec.key}`
+        }));
+        head.add_child(new St.Label({
+            text: _(spec.label),
+            style_class: 'climacn-band-legend-label'
+        }));
+        item.add_child(head);
+        const time = new St.Label({
             text: '--:--',
-            style_class: 'climacn-sun-time',
-            y_align: Clutter.ActorAlign.CENTER
+            style_class: 'climacn-band-legend-time'
         });
-        box.add_child(this._sunriseLabel);
+        item.add_child(time);
+        legend.add_child(item);
+        return time;
+    }
+
+    _buildSunBand() {
+        const outer = new St.BoxLayout({
+            style_class: 'climacn-sun-arc',
+            vertical: true,
+            x_expand: true
+        });
 
         this._sunArcArea = new St.DrawingArea({
             style_class: 'climacn-sun-arc-canvas',
             x_expand: true,
-            height: SUN_ARC_HEIGHT,
-            y_align: Clutter.ActorAlign.CENTER
+            height: BAND_HEIGHT
         });
-        this._sunArcRepaintId = this._sunArcArea.connect('repaint', () => this._drawSunArc());
-        box.add_child(this._sunArcArea);
+        this._sunArcRepaintId = this._sunArcArea.connect('repaint', () => this._drawSunBand());
+        outer.add_child(this._sunArcArea);
 
-        this._sunsetLabel = new St.Label({
-            text: '--:--',
-            style_class: 'climacn-sun-time',
-            y_align: Clutter.ActorAlign.CENTER
+        const legend = new St.BoxLayout({
+            style_class: 'climacn-band-legend',
+            x_expand: true
         });
-        box.add_child(this._sunsetLabel);
+        this._sunLegendLabels = SUN_LEGEND.map(ev => this._buildLegendItem(ev, legend));
+        outer.add_child(legend);
 
         this._sunArcItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
-        this._sunArcItem.add_child(box);
+        this._sunArcItem.add_child(outer);
         this._sunArcItem.visible = false;
         this._indicator.menu.addMenuItem(this._sunArcItem);
     }
 
-    _buildMoonArc() {
+    _buildMoonBand() {
         const outer = new St.BoxLayout({
             style_class: 'climacn-moon-arc',
             vertical: true,
             x_expand: true
         });
 
-        const row = new St.BoxLayout({
-            style_class: 'climacn-sun-arc',
-            y_align: Clutter.ActorAlign.CENTER,
-            x_expand: true
-        });
-
-        this._moonriseLabel = new St.Label({
-            text: '--:--',
-            style_class: 'climacn-sun-time',
-            y_align: Clutter.ActorAlign.CENTER
-        });
-        row.add_child(this._moonriseLabel);
-
         this._moonArcArea = new St.DrawingArea({
             style_class: 'climacn-sun-arc-canvas',
             x_expand: true,
-            height: MOON_ARC_HEIGHT,
-            y_align: Clutter.ActorAlign.CENTER
+            height: BAND_HEIGHT
         });
-        this._moonArcRepaintId = this._moonArcArea.connect('repaint', () => this._drawMoonArc());
-        row.add_child(this._moonArcArea);
+        this._moonArcRepaintId = this._moonArcArea.connect('repaint', () => this._drawMoonBand());
+        outer.add_child(this._moonArcArea);
 
-        this._moonsetLabel = new St.Label({
-            text: '--:--',
-            style_class: 'climacn-sun-time',
-            y_align: Clutter.ActorAlign.CENTER
+        const legend = new St.BoxLayout({
+            style_class: 'climacn-band-legend',
+            x_expand: true
         });
-        row.add_child(this._moonsetLabel);
-        outer.add_child(row);
-
-        this._moonPhaseLabel = new St.Label({
-            text: '',
-            style_class: 'climacn-moon-phase',
-            x_align: Clutter.ActorAlign.CENTER
-        });
-        outer.add_child(this._moonPhaseLabel);
+        this._moonLegendLabels = MOON_LEGEND.map(ev => this._buildLegendItem(ev, legend));
+        outer.add_child(legend);
 
         this._moonArcItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
         this._moonArcItem.add_child(outer);
@@ -2844,16 +2853,24 @@ export default class ClimaCNExtension extends Extension {
         }
     }
 
-    _arcTheta(ratio) {
-        return Math.PI + Math.min(Math.max(ratio, 0), 1) * Math.PI;
-    }
-
     _themeColor(area) {
         const [hasFg, fg] = area.get_theme_node().lookup_color('color', false);
         return hasFg ? [fg.red / 255, fg.green / 255, fg.blue / 255] : [0.5, 0.5, 0.5];
     }
 
-    _drawSunArc() {
+    _drawNowMark(cr, width, cy, height, scaleFactor) {
+        const now = bandRatio(this._nowMinutes);
+        if (now === null)
+            return;
+        const w = Math.max(2, BAND_NOW_W * scaleFactor);
+        const h = Math.min(height, BAND_NOW_H * scaleFactor);
+        const x = Math.min(Math.max(now * width, w / 2), width - w / 2);
+        cr.setSourceRGBA(1, 1, 1, 0.95);
+        this._roundedRectPath(cr, x - w / 2, cy - h / 2, w, h, w / 2);
+        cr.fill();
+    }
+
+    _drawSunBand() {
         const area = this._sunArcArea;
         const astro = this._astro;
         if (!area || !astro)
@@ -2864,83 +2881,44 @@ export default class ClimaCNExtension extends Extension {
         const cr = area.get_context();
         try {
             const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
-            const lineWidth = Math.max(1.5, 2 * scaleFactor);
-            const pad = lineWidth + 4 * scaleFactor;
-            const rx = (width - 2 * arcSideInset(lineWidth, scaleFactor)) / 2;
-            const ry = height - 2 * pad;
-            if (rx <= 0 || ry <= 0)
-                return;
-            const cx = width / 2;
-            const cy = height - pad;
-            const rxAt = ratio => cx + rx * Math.cos(this._arcTheta(ratio));
-            const ryAt = ratio => cy + ry * Math.sin(this._arcTheta(ratio));
+            const bandH = Math.min(height, BAND_HEIGHT * scaleFactor);
+            const y = (height - bandH) / 2;
+            const cy = height / 2;
 
-            const ellipsePath = () => {
-                cr.save();
-                cr.translate(cx, cy);
-                cr.scale(rx, ry);
-                cr.arc(0, 0, 1, Math.PI, 2 * Math.PI);
-                cr.restore();
-            };
+            const grad = new Cairo.LinearGradient(0, 0, width, 0);
+            for (let i = 0; i <= BAND_STOPS; i++) {
+                const t = i / BAND_STOPS;
+                const c = skyColorAt(t * DAY_MINUTES, astro);
+                grad.addColorStopRGBA(t, c[0], c[1], c[2], 1);
+            }
+            cr.setSource(grad);
+            this._roundedRectPath(cr, 0, y, width, bandH,
+                                  BAND_RADIUS * scaleFactor);
+            cr.fill();
 
-            cr.setLineWidth(lineWidth);
-            cr.setLineCap(Cairo.LineCap.ROUND);
-
-            cr.setSourceRGBA(0.5, 0.5, 0.5, 0.25);
-            ellipsePath();
+            cr.setSourceRGBA(1, 1, 1, 0.45);
+            cr.setLineWidth(Math.max(1, 1.5 * scaleFactor));
+            cr.moveTo(0, cy);
+            cr.lineTo(width, cy);
             cr.stroke();
 
-            const span = sunArcSpan(astro);
-            const total = span.end - span.start;
-            if (total <= 0)
-                return;
-            const ratioAt = m => Math.min(Math.max((m - span.start) / total, 0), 1);
-
-            if (span.hasTwilight) {
-                const SEGMENTS = 96;
-                let prev = null;
-                for (let i = 0; i <= SEGMENTS; i++) {
-                    const ratio = i / SEGMENTS;
-                    const px = rxAt(ratio);
-                    const py = ryAt(ratio);
-                    if (prev) {
-                        const mid = span.start + (ratio - 0.5 / SEGMENTS) * total;
-                        const c = skyColorAt(mid, astro);
-                        cr.setSourceRGBA(c[0], c[1], c[2], 1);
-                        cr.moveTo(prev[0], prev[1]);
-                        cr.lineTo(px, py);
-                        cr.stroke();
-                    }
-                    prev = [px, py];
-                }
-            } else {
-                cr.setSourceRGBA(SKY_DAY[0], SKY_DAY[1], SKY_DAY[2], 0.9);
-                ellipsePath();
+            const knobR = BAND_KNOB_R * scaleFactor;
+            for (const ev of SUN_LEGEND) {
+                const r = bandRatio(astro[ev.field]);
+                if (r === null)
+                    continue;
+                const color = BAND_LEVEL_COLORS[ev.key];
+                const x = r * width;
+                cr.setSourceRGBA(color[0], color[1], color[2], 1);
+                cr.arc(x, cy, knobR, 0, 2 * Math.PI);
+                cr.fill();
+                cr.setSourceRGBA(1, 1, 1, 0.9);
+                cr.setLineWidth(Math.max(1.2, 1.6 * scaleFactor));
+                cr.arc(x, cy, knobR, 0, 2 * Math.PI);
                 cr.stroke();
             }
 
-            const fg = this._themeColor(area);
-            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.5);
-            cr.setLineWidth(Math.max(1, 1.2 * scaleFactor));
-            const tick = 3.5 * scaleFactor;
-            for (const m of [astro.sunrise, astro.sunset]) {
-                const r = ratioAt(m);
-                const px = rxAt(r), py = ryAt(r);
-                const dx = (px - cx) / rx, dy = (py - cy) / ry;
-                const len = Math.hypot(dx, dy) || 1;
-                cr.moveTo(px - dx / len * tick, py - dy / len * tick);
-                cr.lineTo(px + dx / len * tick, py + dy / len * tick);
-            }
-            cr.stroke();
-
-            const pos = this._sunPosition;
-            if (!pos)
-                return;
-            const alpha = pos.isDay ? 1 : 0.45;
-            cr.setSourceRGBA(SKY_DAY[0], SKY_DAY[1], SKY_DAY[2], alpha);
-            cr.arc(rxAt(pos.ratio), ryAt(pos.ratio),
-                   Math.max(3.5, 4.5 * scaleFactor), 0, 2 * Math.PI);
-            cr.fill();
+            this._drawNowMark(cr, width, cy, height, scaleFactor);
         } finally {
             cr.$dispose();
         }
@@ -2985,7 +2963,7 @@ export default class ClimaCNExtension extends Extension {
         cr.stroke();
     }
 
-    _drawMoonArc() {
+    _drawMoonBand() {
         const area = this._moonArcArea;
         const moon = this._astro?.moon;
         if (!area || !moon)
@@ -2996,48 +2974,69 @@ export default class ClimaCNExtension extends Extension {
         const cr = area.get_context();
         try {
             const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
-            const lineWidth = Math.max(1.5, 2 * scaleFactor);
-            const pad = lineWidth + 3 * scaleFactor;
-            const discR = MOON_DISC_RADIUS * scaleFactor;
-            const rx = (width - 2 * arcSideInset(lineWidth, scaleFactor)) / 2;
-            const ry = height - 2 * pad - 2 * discR;
-            if (rx <= 0 || ry <= 0)
-                return;
-            const cx = width / 2;
-            const cy = height - pad - discR;
+            const bandH = Math.min(height, BAND_HEIGHT * scaleFactor);
+            const y = (height - bandH) / 2;
+            const cy = height / 2;
             const fg = this._themeColor(area);
-            const pxAt = ratio => cx + rx * Math.cos(this._arcTheta(ratio));
-            const pyAt = ratio => cy + ry * Math.sin(this._arcTheta(ratio));
+            const radius = BAND_RADIUS * scaleFactor;
 
-            cr.setLineWidth(lineWidth);
-            cr.setLineCap(Cairo.LineCap.ROUND);
-            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.25);
-            cr.save();
-            cr.translate(cx, cy);
-            cr.scale(rx, ry);
-            cr.arc(0, 0, 1, Math.PI, 2 * Math.PI);
-            cr.restore();
-            cr.stroke();
+            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.10);
+            this._roundedRectPath(cr, 0, y, width, bandH, radius);
+            cr.fill();
 
-            const pos = this._moonPosition;
-            if (!pos) {
-                this._drawMoonDisc(cr, cx, cy - ry, discR, moon.phase, fg, 0.6);
-                return;
+            for (const [start, end] of moonUpSpans(moon)) {
+                const x0 = (start / DAY_MINUTES) * width;
+                const x1 = (end / DAY_MINUTES) * width;
+                cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.32);
+                this._roundedRectPath(cr, x0, y, x1 - x0, bandH, radius);
+                cr.fill();
             }
-            const alpha = pos.isUp ? 1 : 0.4;
-            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.85 * alpha);
-            cr.save();
-            cr.translate(cx, cy);
-            cr.scale(rx, ry);
-            cr.arc(0, 0, 1, Math.PI, this._arcTheta(pos.ratio));
-            cr.restore();
+
+            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.45);
+            cr.setLineWidth(Math.max(1, 1.5 * scaleFactor));
+            cr.moveTo(0, cy);
+            cr.lineTo(width, cy);
             cr.stroke();
 
-            this._drawMoonDisc(cr, pxAt(pos.ratio), pyAt(pos.ratio),
-                               discR, moon.phase, fg, alpha);
+            const knobR = BAND_KNOB_R * scaleFactor;
+            for (const m of [moon.moonrise, moon.moonset % DAY_MINUTES]) {
+                const r = bandRatio(m);
+                if (r === null)
+                    continue;
+                const x = r * width;
+                cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.95);
+                cr.arc(x, cy, knobR, 0, 2 * Math.PI);
+                cr.fill();
+                cr.setSourceRGBA(1, 1, 1, 0.5);
+                cr.setLineWidth(Math.max(1.2, 1.6 * scaleFactor));
+                cr.arc(x, cy, knobR, 0, 2 * Math.PI);
+                cr.stroke();
+            }
+
+            const now = bandRatio(this._nowMinutes);
+            if (now === null)
+                return;
+            const discR = MOON_DISC_RADIUS * scaleFactor;
+            const x = Math.min(Math.max(now * width, discR), width - discR);
+            this._drawMoonDisc(cr, x, cy, discR, moon.phase, fg,
+                               this._moonPosition?.isUp ? 1 : 0.4);
         } finally {
             cr.$dispose();
         }
+    }
+
+    _roundedRectPath(cr, x, y, w, h, radius) {
+        const r = Math.max(0, Math.min(radius, h / 2, w / 2));
+        cr.newSubPath();
+        if (r <= 0) {
+            cr.rectangle(x, y, w, h);
+            return;
+        }
+        cr.arc(x + w - r, y + r, r, -Math.PI / 2, 0);
+        cr.arc(x + w - r, y + h - r, r, 0, Math.PI / 2);
+        cr.arc(x + r, y + h - r, r, Math.PI / 2, Math.PI);
+        cr.arc(x + r, y + r, r, Math.PI, Math.PI * 1.5);
+        cr.closePath();
     }
 
     _roundedBarPath(cr, x, y, w, h) {
@@ -3288,27 +3287,27 @@ export default class ClimaCNExtension extends Extension {
             const n = GLib.DateTime.new_now_local();
             return n.get_hour() * 60 + n.get_minute();
         })();
-        this._sunPosition = this._astro ? sunArcPosition(nowMinutes, this._astro) : null;
+        this._nowMinutes = nowMinutes;
         this._moonPosition = this._astro?.moon
             ? moonArcPosition(nowMinutes, this._astro.moon) : null;
 
-        if (this._astro) {
-            this._sunriseLabel.text = formatClock(this._astro.sunrise);
-            this._sunsetLabel.text = formatClock(this._astro.sunset);
-        }
         if (this._sunArcItem) {
             this._sunArcItem.visible = this._astro !== null;
-            if (this._astro)
+            if (this._astro) {
+                SUN_LEGEND.forEach((ev, i) => {
+                    this._sunLegendLabels[i].text = formatClock(this._astro[ev.field]);
+                });
                 this._sunArcArea.queue_repaint();
+            }
         }
 
         const moon = this._astro?.moon ?? null;
         if (this._moonArcItem) {
             this._moonArcItem.visible = moon !== null;
             if (moon) {
-                this._moonriseLabel.text = formatClock(moon.moonrise);
-                this._moonsetLabel.text = formatClock(moon.moonset % (24 * 60));
-                this._moonPhaseLabel.text = moon.phase?.name ?? '';
+                this._moonLegendLabels[0].text = formatClock(moon.moonrise);
+                this._moonLegendLabels[1].text = formatClock(moon.moonset);
+                this._moonLegendLabels[2].text = moon.phase?.name || '--';
                 this._moonArcArea.queue_repaint();
             }
         }
@@ -3441,7 +3440,7 @@ export default class ClimaCNExtension extends Extension {
         if (this._aqiGroup)
             this._aqiGroup.visible = false;
 
-        this._sunPosition = null;
+        this._nowMinutes = 0;
         this._astro = null;
         this._moonPosition = null;
         if (this._sunArcItem)
