@@ -810,6 +810,7 @@ function parseAlerts(json) {
         .map(a => {
             const level = alertLevel(a.severity);
             return {
+                id: String(a.id ?? '').trim(),
                 title: a.title.trim(),
                 level,
                 type: String(a.signaltype ?? '').trim(),
@@ -1614,7 +1615,7 @@ export default class ClimaCNExtension extends Extension {
         if (!this._alertItem || this._alerts.length === 0)
             return;
 
-        const missing = this._alerts.filter(a => !this._alertDetails.has(a.id));
+        const missing = this._alerts.filter(a => a.id && !this._alertDetails.has(a.id));
         this._renderAlertDetails();
         for (const alert of missing) {
             this._alertDetails.set(alert.id, null);
@@ -1667,16 +1668,18 @@ export default class ClimaCNExtension extends Extension {
                 style_class: 'climacn-alert-detail'
             });
 
-            const head = new St.BoxLayout({ style_class: 'climacn-alert-detail-head' });
-            const dot = new St.Widget({
-                style_class: `climacn-alert-dot alert-${alert.level.key}`,
-                y_align: Clutter.ActorAlign.CENTER
-            });
-            head.add_child(dot);
-            head.add_child(this._wrappedAlertLabel(alert.title, 'climacn-alert-detail-title'));
-            box.add_child(head);
+            if (this._alerts.length > 1) {
+                const head = new St.BoxLayout({ style_class: 'climacn-alert-detail-head' });
+                const dot = new St.Widget({
+                    style_class: `climacn-alert-dot alert-${alert.level.key}`,
+                    y_align: Clutter.ActorAlign.CENTER
+                });
+                head.add_child(dot);
+                head.add_child(this._wrappedAlertLabel(alert.title, 'climacn-alert-detail-title'));
+                box.add_child(head);
+            }
 
-            const detail = this._alertDetails.get(alert.id);
+            const detail = alert.id ? this._alertDetails.get(alert.id) : ALERT_DETAIL_FAILED;
             if (!detail || detail === ALERT_DETAIL_FAILED) {
                 box.add_child(new St.Label({
                     text: detail === ALERT_DETAIL_FAILED ? _('详情暂时取不到') : _('详情加载中…'),
