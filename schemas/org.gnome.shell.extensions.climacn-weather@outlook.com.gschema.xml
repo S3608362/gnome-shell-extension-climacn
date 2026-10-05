@@ -3,14 +3,12 @@
   <schema id="org.gnome.shell.extensions.climacn-weather@outlook.com"
           path="/org/gnome/shell/extensions/climacn-weather@outlook.com/">
 
-    <!-- API Key -->
     <key name="api-key" type="s">
       <default>''</default>
       <summary>和风天气 API Key</summary>
       <description>用于和风天气 API 的身份验证密钥。新版 v1 接口同样使用 API Key。</description>
     </key>
 
-    <!-- API Host -->
     <key name="api-base-url" type="s">
       <default>''</default>
       <summary>和风天气 API Host</summary>
@@ -19,7 +17,6 @@
         自 2026 年起逐步停止服务，因此不提供默认值。</description>
     </key>
 
-    <!-- 当前城市坐标 -->
     <key name="latitude" type="d">
       <default>39.9050</default>
       <summary>当前城市纬度</summary>
@@ -32,14 +29,12 @@
       <description>和风天气 v1 接口按经纬度定位，默认值为北京。</description>
     </key>
 
-    <!-- 当前城市显示名 -->
     <key name="city-name" type="s">
       <default>'北京，北京市'</default>
       <summary>当前城市显示名称</summary>
       <description>显示在菜单卡片头下方的城市名称。</description>
     </key>
 
-    <!-- 每日请求计数（用于配额保护，跨重启保留） -->
     <key name="daily-request-count" type="i">
       <default>0</default>
       <summary>今日已发出的 API 请求数</summary>
@@ -52,11 +47,6 @@
       <description>记录 daily-request-count 是哪一天的计数，日期变化时归零。</description>
     </key>
 
-    <!-- 已废弃：由下面四个 source-* 键取代。
-         保留它只为让首选项能做一次性迁移——键一旦从 schema 里删掉，
-         get_user_value() 就再也读不到老用户当初的选择，而那个选择的
-         默认值是「不发第三方请求」，不能当成「随便发」。
-         等确认老用户都已升级后可以在下个大版本移除。 -->
     <key name="use-open-meteo-fallback" type="b">
       <default>false</default>
       <summary>（已废弃）启用 Open-Meteo 兜底</summary>
@@ -64,20 +54,12 @@
         仅用于把老用户的开关状态迁移到新键上。</description>
     </key>
 
-    <!-- 设置结构版本号，用于只跑一次的数据迁移 -->
     <key name="settings-version" type="i">
       <default>0</default>
       <summary>设置结构版本</summary>
       <description>首选项据此判断是否需要执行数据迁移。0 表示尚未迁移过
         （即从使用了旧布尔开关的版本升级而来）。</description>
     </key>
-
-    <!-- ================================================================
-         数据源选择：四类内容各自独立
-         取值 auto（和风可用就用和风，否则 Open-Meteo）、qweather、openmeteo。
-         之所以分成四类，是因为两个源各有长短：和风有三段曙暮光，Open-Meteo
-         的月相是连续照亮比例、逐日预报多到 16 天、且无需凭据。
-         ================================================================ -->
 
     <key name="source-current" type="s">
       <default>'auto'</default>
@@ -111,7 +93,6 @@
         暮光分段，但月亮部分更精确。</description>
     </key>
 
-    <!-- 是否在日历菜单里显示天气卡片 -->
     <key name="show-in-calendar" type="b">
       <default>false</default>
       <summary>在日历菜单里显示天气卡片</summary>
@@ -123,7 +104,18 @@
         扩展其余部分不受影响。</description>
     </key>
 
-    <!-- 调试日志开关 -->
+    <key name="show-alerts" type="b">
+      <default>false</default>
+      <summary>显示天气预警</summary>
+      <description>默认关闭。开启后，菜单里会多出一行当前城市的天气预警
+        （如「雷电黄色预警」），没有预警时整行不显示。
+
+        预警来自中国气象局官网 weather.cma.cn 的内部接口，仅在中国大陆境内
+        可用，且没有公开文档与稳定性承诺——同一批被逆向出来的另外几个接口
+        已经停止服务。扩展会把解析出的站点编号发给该接口以取得预警，
+        不会发送其它信息。取不到数据时整行静默隐藏，不影响其它内容。</description>
+    </key>
+
     <key name="debug-logging" type="b">
       <default>false</default>
       <summary>输出调试日志</summary>
@@ -133,7 +125,6 @@
         日常使用不需要开启，出错时菜单里也会给出提示。</description>
     </key>
 
-    <!-- 气压历史（供趋势判断，JSON 数组，跨重启保留） -->
     <key name="pressure-history" type="s">
       <default>''</default>
       <summary>近期气压采样</summary>

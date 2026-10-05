@@ -1,16 +1,13 @@
-// prefs.js
+
 import Adw from 'gi://Adw';
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk';
 
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-/* 数据源下拉的可选值与顺序。存进 GSettings 的是这里的字符串，
- * 不是下标——下标会随后续增删选项而错位。 */
 const SOURCE_VALUES = ['auto', 'qweather', 'openmeteo'];
 const SOURCE_LABELS = ['自动', '和风天气', 'Open-Meteo'];
 
-/* 四个类别。subtitle 写清各自的取舍，用户不必去查文档才知道该选哪个。 */
 const SOURCE_ROWS = [
     {
         key: 'source-current',
@@ -38,13 +35,6 @@ const SOURCE_ROWS = [
 
 const SETTINGS_VERSION = 1;
 
-/* 一次性迁移。旧版本只有一个布尔开关「启用 Open-Meteo 兜底」，默认关闭；
- * 它被四个下拉取代，但**不能把旧默认当成 auto**——那会让从没同意过
- * 第三方请求的用户，在不知情的情况下开始把城市坐标发给 Open-Meteo。
- *
- * 用 get_user_value 而不是 get_boolean：前者在用户从未改过时返回 null，
- * 后者会返回 schema 默认值，两者区分不开「显式关掉」和「从没设过」。
- * 迁移只跑一次，靠 settings-version 记，否则用户之后的下拉选择会被覆盖。 */
 function migrateSettings(settings) {
     if (settings.get_int('settings-version') >= SETTINGS_VERSION)
         return;
@@ -63,8 +53,6 @@ function addSourceRow(settings, group, { key, title, subtitle }) {
         subtitle,
         model: Gtk.StringList.new(SOURCE_LABELS),
     });
-    // 与上面两个 EntryRow 一样走手动同步：GSettings 存的是字符串，
-    // 而下拉给的是下标，绑定不能直接用
     const current = SOURCE_VALUES.indexOf(settings.get_string(key));
     row.selected = current >= 0 ? current : 0;
     row.connect('notify::selected', (widget) => {
@@ -86,7 +74,6 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
         });
         window.add(page);
 
-        // --- API 设置分组 ---
         const apiGroup = new Adw.PreferencesGroup({
             title: 'API 设置',
             description: '两项均可在和风天气控制台获取。公共 API 地址（devapi.qweather.com 等）自 2026 年起停止服务，请务必填写你自己的 API Host。',
@@ -111,8 +98,6 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
         });
         apiGroup.add(apiHostRow);
 
-        // --- 数据源分组 ---
-        // 四类内容各自选源：两个源各有长短，一个总开关没法取长补短
         const sourcePickGroup = new Adw.PreferencesGroup({
             title: '数据源',
             description: '四类内容可以分别选择来源。选「自动」时，填了和风凭据就用和风，' +
@@ -124,7 +109,6 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
         for (const spec of SOURCE_ROWS)
             addSourceRow(settings, sourcePickGroup, spec);
 
-        // --- 显示分组 ---
         const displayGroup = new Adw.PreferencesGroup({ title: '显示' });
         page.add(displayGroup);
 
@@ -139,7 +123,16 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
             Gio.SettingsBindFlags.DEFAULT);
         displayGroup.add(calendarRow);
 
-        // --- 排查问题分组 ---
+        const alertRow = new Adw.SwitchRow({
+            title: '显示天气预警',
+            subtitle: '菜单里显示当前城市的天气预警（如「雷电黄色预警」），没有预警时不占位置。' +
+                '数据来自中国气象局官网的内部接口，仅在中国大陆可用，且没有稳定性承诺，' +
+                '取不到时静默隐藏。开启后扩展会把解析出的站点编号发给该接口。',
+        });
+        settings.bind('show-alerts', alertRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        displayGroup.add(alertRow);
+
         const debugGroup = new Adw.PreferencesGroup({
             title: '排查问题',
             description: '获取数据失败时菜单里会给出提示。若要知道更具体的原因，' +
@@ -156,16 +149,12 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
             Gio.SettingsBindFlags.DEFAULT);
         debugGroup.add(debugRow);
 
-        // --- 说明分组 ---
         const infoGroup = new Adw.PreferencesGroup({
             title: '说明',
             description: 'API Host 形如 abcxyz.qweatherapi.com，无需填写 https://。城市搜索使用本地数据库（data/China-City-List-latest.csv），图标使用本地 SVG。',
         });
         page.add(infoGroup);
 
-        // --- 数据来源分组 ---
-        // 和风天气条款要求数据归因与数据共同显示：菜单里保留一行来源，
-        // 完整的说明与链接集中放在这里
         const sourceGroup = new Adw.PreferencesGroup({
             title: '数据来源',
             description: '和风天气（QWeather）\n' +

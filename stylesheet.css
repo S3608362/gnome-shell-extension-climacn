@@ -1,59 +1,29 @@
-/* ---------------------------------------------------------------------
- * 菜单整体宽度
- * Shell 默认只给 .popup-menu 一个 15em 的下限，实际宽度由内容撑出来，
- * 结果是一条又窄又长的竖条。这里把菜单内容盒加个下限撑宽，
- * 让它接近方形，多出来的横向空间交给温度条、折线图和状况列去用。
- *
- * 用 min-width 而不是 width：城市名、天气状况偶尔会很长，
- * 定死宽度会被裁掉，给下限则内容需要时仍能自己撑开。
- *
- *   想调宽窄改这一处即可。
- * --------------------------------------------------------------------- */
 .climacn-menu {
   min-width: 460px;
 }
 
-/* ---------------------------------------------------------------------
- * 水平内边距统一为 12px
- * 各内容区若用不同的值，搜索框就会比下方文字更靠外，视觉上错位。
- * --------------------------------------------------------------------- */
 .climacn-header-box,
 .climacn-details-grid,
 .climacn-forecast-box {
   padding: 8px 12px;
 }
 
-/* ---------------------------------------------------------------------
- * 顶栏 indicator 样式
- * --------------------------------------------------------------------- */
 .climacn-indicator-box {
   spacing: 6px;
-}
-
-.climacn-panel-icon {
-  /* 图标大小由 icon_size 在 JS 中指定 */
 }
 
 .climacn-temperature {
   font-weight: bold;
   font-size: 0.95em;
-  /* 等宽数字：温度在 9° ↔ 22° ↔ -10° 之间变化时指示器宽度不跳动 */
   font-feature-settings: 'tnum';
 }
 
-/* ---------------------------------------------------------------------
- * 卡片头（大图标 + 大号温度 + 天气状况 + 城市名）
- * --------------------------------------------------------------------- */
 .climacn-header-box {
   spacing: 4px;
 }
 
 .climacn-header-row {
   spacing: 10px;
-}
-
-.climacn-header-icon {
-  /* 图标大小由 icon_size 在 JS 中指定 */
 }
 
 .climacn-header-temp {
@@ -72,7 +42,6 @@
   opacity: 0.7;
 }
 
-/* AQI 标识 + 色环：环与中心数值都在 Cairo 里画，这里只定间距与文字样式 */
 .climacn-aqi-group {
   spacing: 4px;
 }
@@ -86,10 +55,6 @@
   opacity: 0.6;
 }
 
-/* ---------------------------------------------------------------------
- * 自绘图表（日出日落弧线、10 天趋势折线）
- * 内容全部由 Cairo 绘制，这里只定尺寸与间距
- * --------------------------------------------------------------------- */
 .climacn-sun-arc {
   margin: 4px 0px 0px 0px;
   spacing: 8px;
@@ -101,15 +66,6 @@
   font-feature-settings: 'tnum';
 }
 
-.climacn-sun-arc-canvas {
-  /* 高度由 JS 指定 */
-}
-
-.climacn-trend-chart {
-  /* 宽高由 JS 指定：折线在子菜单里，没有可撑开的余量 */
-}
-
-/* 月亮弧线与月相名称 */
 .climacn-moon-arc {
   margin: 2px 0px 0px 0px;
 }
@@ -120,21 +76,10 @@
   margin-bottom: 2px;
 }
 
-/* 子菜单里折线与月相条上下相叠 */
 .climacn-trend-box {
   spacing: 2px;
 }
 
-.climacn-trend-moons {
-  /* 宽高由 JS 指定 */
-}
-
-/* ---------------------------------------------------------------------
- * 城市搜索框样式
- * --------------------------------------------------------------------- */
-/* 搜索区的两行都不是可点的菜单动作，去掉菜单项在悬停/选中时的底色。
- * Shell 主题给 .popup-menu-item:active 加了灰色背景，用在输入框上会糊成
- * 一大块灰，把输入框衬得很难看。同权重下后加载的样式生效，所以能覆盖。 */
 .climacn-search-row,
 .climacn-search-row:hover,
 .climacn-search-row:active,
@@ -147,27 +92,19 @@
 .climacn-search-entry {
   padding: 6px 12px;
   font-size: 0.9em;
-  /* 与菜单项的圆角一致，之前是 8px，和周围对不上 */
   border-radius: 12px;
-  /* 与上方各内容区保持同一个水平内边距 */
   margin: 0px 12px;
 }
 
-/* 说明/状态行：只有一行小字，不需要菜单项那么高的内边距，
- * 也别为它多占高度。左内边距与其它内容区对齐 */
 .climacn-search-status-row {
   padding: 0px 12px 4px 12px;
 }
 
-/* 搜索状态提示（“未找到相关城市”等），不能复用带固定宽度的 detail-label */
 .climacn-search-status {
   font-size: 0.85em;
   opacity: 0.7;
 }
 
-/* ---------------------------------------------------------------------
- * 详情区（两列网格）
- * --------------------------------------------------------------------- */
 .climacn-details-grid {
   spacing: 8px;
 }
@@ -180,8 +117,6 @@
   spacing: 8px;
 }
 
-/* 固定标签宽度，让左右两列的值各自对齐。
- * 4.5em 是为了容纳最长的“上次更新”（4 个汉字）。 */
 .climacn-detail-label {
   font-size: 0.9em;
   width: 4.5em;
@@ -194,9 +129,6 @@
   font-weight: bold;
 }
 
-/* ---------------------------------------------------------------------
- * 未来 3 天预报区域
- * --------------------------------------------------------------------- */
 .climacn-forecast-box {
   spacing: 8px;
 }
@@ -216,7 +148,6 @@
   spacing: 12px;
 }
 
-/* 1. 日期 fixed 宽度对齐 */
 .climacn-forecast-day {
   font-size: 0.9em;
   width: 48px;
@@ -227,13 +158,10 @@
   icon-size: 18px;
 }
 
-/* 温度条：宽高在 JS 中指定，必须固定宽度——若让它弹性伸缩，
- * 各行的天气状况文字长短不同会导致条长不等，位置编码随之失效 */
 .climacn-temp-bar {
   margin: 0px 2px;
 }
 
-/* 2. 温度范围 fixed 宽度，右侧状况文字因此始终从同一位置开始 */
 .climacn-forecast-temp {
   font-size: 0.9em;
   font-weight: bold;
@@ -252,18 +180,33 @@
   opacity: 0.6;
 }
 
-/* ---------------------------------------------------------------------
- * 数据归因（和风天气条款要求与数据共同显示）
- * --------------------------------------------------------------------- */
 .climacn-attribution {
   font-size: 0.75em;
   opacity: 0.55;
 }
 
-/* ---------------------------------------------------------------------
- * 状态提示（如每日请求额度用尽）
- * --------------------------------------------------------------------- */
 .climacn-notice {
   font-size: 0.8em;
   opacity: 0.8;
+}
+
+.climacn-alert-row {
+  padding: 8px 12px;
+}
+
+.climacn-alert-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 4px;
+  margin-right: 8px;
+  background-color: #9a9996;
+}
+
+.climacn-alert-dot.alert-blue   { background-color: #3584e4; }
+.climacn-alert-dot.alert-yellow { background-color: #e5a50a; }
+.climacn-alert-dot.alert-orange { background-color: #ff7800; }
+.climacn-alert-dot.alert-red    { background-color: #e01b24; }
+
+.climacn-alert-label {
+  font-size: 0.85em;
 }

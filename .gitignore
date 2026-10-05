@@ -2,3 +2,7 @@ schemas/gschemas.compiled
 settings.json
 *.zip
 .DS_Store
+
+# Python 编译产物
+__pycache__/
+*.pyc
