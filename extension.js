@@ -2896,17 +2896,22 @@ export default class ClimaCNExtension extends Extension {
             cr.stroke();
 
             const knobR = BAND_KNOB_R * scaleFactor;
+            const ringW = Math.max(1.2, 1.6 * scaleFactor);
             for (const ev of SUN_LEGEND) {
                 const r = bandRatio(astro[ev.field]);
                 if (r === null)
                     continue;
                 const color = BAND_DOT_COLORS[ev.key];
                 const x = r * width;
+                cr.setSourceRGBA(0, 0, 0, 0.45);
+                cr.setLineWidth(Math.max(1, 1.2 * scaleFactor));
+                cr.arc(x, cy, knobR + ringW, 0, 2 * Math.PI);
+                cr.stroke();
                 cr.setSourceRGBA(color[0], color[1], color[2], 1);
                 cr.arc(x, cy, knobR, 0, 2 * Math.PI);
                 cr.fill();
                 cr.setSourceRGBA(1, 1, 1, 0.9);
-                cr.setLineWidth(Math.max(1.2, 1.6 * scaleFactor));
+                cr.setLineWidth(ringW);
                 cr.arc(x, cy, knobR, 0, 2 * Math.PI);
                 cr.stroke();
             }
@@ -2973,14 +2978,14 @@ export default class ClimaCNExtension extends Extension {
             const fg = this._themeColor(area);
             const radius = BAND_RADIUS * scaleFactor;
 
-            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.10);
+            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.16);
             this._roundedRectPath(cr, 0, y, width, bandH, radius);
             cr.fill();
 
             for (const [start, end] of moonUpSpans(moon)) {
                 const x0 = (start / DAY_MINUTES) * width;
                 const x1 = (end / DAY_MINUTES) * width;
-                cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.32);
+                cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.42);
                 this._roundedRectPath(cr, x0, y, x1 - x0, bandH, radius);
                 cr.fill();
             }
@@ -2991,18 +2996,28 @@ export default class ClimaCNExtension extends Extension {
             cr.lineTo(width, cy);
             cr.stroke();
 
+            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.30);
+            cr.setLineWidth(Math.max(1, 1 * scaleFactor));
+            this._roundedRectPath(cr, 0, y, width, bandH, radius);
+            cr.stroke();
+
             const knobR = BAND_KNOB_R * scaleFactor;
+            const ringW = Math.max(1.2, 1.6 * scaleFactor);
             const knobColor = BAND_DOT_COLORS.moon;
             for (const m of [moon.moonrise, moon.moonset % DAY_MINUTES]) {
                 const r = bandRatio(m);
                 if (r === null)
                     continue;
                 const x = r * width;
+                cr.setSourceRGBA(0, 0, 0, 0.45);
+                cr.setLineWidth(Math.max(1, 1.2 * scaleFactor));
+                cr.arc(x, cy, knobR + ringW, 0, 2 * Math.PI);
+                cr.stroke();
                 cr.setSourceRGBA(knobColor[0], knobColor[1], knobColor[2], 1);
                 cr.arc(x, cy, knobR, 0, 2 * Math.PI);
                 cr.fill();
-                cr.setSourceRGBA(1, 1, 1, 0.75);
-                cr.setLineWidth(Math.max(1.2, 1.6 * scaleFactor));
+                cr.setSourceRGBA(1, 1, 1, 0.9);
+                cr.setLineWidth(ringW);
                 cr.arc(x, cy, knobR, 0, 2 * Math.PI);
                 cr.stroke();
             }
