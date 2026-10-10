@@ -6,7 +6,8 @@ import {
     getCmaAlertDetailUrl,
     getCmaAlertsUrl,
     parseAlertDetail,
-    parseAlerts
+    parseAlerts,
+    parseStationList
 } from '../lib/alerts.js';
 import { logError } from '../lib/util.js';
 import { gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -15,6 +16,7 @@ import Soup from 'gi://Soup?version=3.0';
 import Clutter from 'gi://Clutter';
 import Pango from 'gi://Pango';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import Gio from 'gi://Gio';
 
 export class AlertsSection {
     constructor(owner) {
@@ -28,6 +30,9 @@ export class AlertsSection {
         this._list = [];
         this._gen = 0;
         this._failCount = 0;
+        this._stations = null;
+        this._stationsLoading = false;
+        this._stationWaiters = [];
     }
 
     setEnabled(on) {
@@ -80,19 +85,54 @@ export class AlertsSection {
         if (this._failCount >= ALERT_MAX_FAILURES)
             return;
 
-        this._owner._loadStationData(() => {
+        this._loadStationData(() => {
             if (!this._owner._isActive() || !this._owner._settings?.get_boolean('show-alerts'))
                 return;
             if (this._failCount >= ALERT_MAX_FAILURES)
                 return;
 
             const station = findNearestStation(
-                this._owner._cmaStations, this._owner._latitude, this._owner._longitude);
+                this._stations, this._owner._latitude, this._owner._longitude);
             if (!station) {
                 this._update([]);
                 return;
             }
             this._fetchAlerts(station.id, this._gen);
+        });
+    }
+
+_loadStationData(callback) {
+        if (this._stations) {
+            callback();
+            return;
+        }
+        if (this._stationsLoading) {
+            this._stationWaiters.push(callback);
+            return;
+        }
+        this._stationsLoading = true;
+        this._stationWaiters.push(callback);
+
+        const file = Gio.File.new_for_path(`${this._owner.path}/data/CMA-Station-List.csv`);
+        file.load_contents_async(null, (f, result) => {
+            const waiters = this._stationWaiters;
+            this._stationWaiters = [];
+            this._stationsLoading = false;
+            if (!this._owner._isActive())
+                return;
+            try {
+                const [ok, contents] = f.load_contents_finish(result);
+                if (!ok)
+                    throw new Error('load failed');
+                this._stations = parseStationList(new TextDecoder().decode(contents));
+            } catch (e) {
+                logError(`站点表加载失败: ${e}`);
+                this._stations = [];
+            }
+            for (const fn of waiters) {
+                if (this._owner._isActive())
+                    fn();
+            }
         });
     }
 
@@ -283,5 +323,8 @@ export class AlertsSection {
         this._list = [];
         this._details?.clear();
         this._details = null;
+        this._stations = null;
+        this._stationsLoading = false;
+        this._stationWaiters = [];
     }
 }

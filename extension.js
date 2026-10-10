@@ -10,8 +10,6 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
-
-import { parseStationList } from './lib/alerts.js';
 import {
     AQI_FONT_PX,
     AQI_MAX_FAILURES,
@@ -87,9 +85,6 @@ export default class ClimaCNExtension extends Extension {
         this._refreshActivateId = 0;
         this._showInCalendarId = 0;
         this._showAlertsId = 0;
-        this._cmaStations = null;
-        this._loadingStations = false;
-        this._stationWaiters = [];
         this._session = new Soup.Session();
 
         this._iconExistsCache = new Map();
@@ -295,9 +290,6 @@ export default class ClimaCNExtension extends Extension {
         this._aqi = null;
         this._aqiFailCount = 0;
         this._pressureHistory = [];
-        this._cmaStations = null;
-        this._loadingStations = false;
-        this._stationWaiters = [];
         this._attributionText = '';
         this._errorShown = false;
         this._lastFetchAt = 0;
@@ -489,40 +481,7 @@ export default class ClimaCNExtension extends Extension {
 
     
 
-    _loadStationData(callback) {
-        if (this._cmaStations) {
-            callback();
-            return;
-        }
-        if (this._loadingStations) {
-            this._stationWaiters.push(callback);
-            return;
-        }
-        this._loadingStations = true;
-        this._stationWaiters.push(callback);
-
-        const file = Gio.File.new_for_path(`${this.path}/data/CMA-Station-List.csv`);
-        file.load_contents_async(null, (f, result) => {
-            const waiters = this._stationWaiters;
-            this._stationWaiters = [];
-            this._loadingStations = false;
-            if (!this._isActive())
-                return;
-            try {
-                const [ok, contents] = f.load_contents_finish(result);
-                if (!ok)
-                    throw new Error('load failed');
-                this._cmaStations = parseStationList(new TextDecoder().decode(contents));
-            } catch (e) {
-                logError(`站点表加载失败: ${e}`);
-                this._cmaStations = [];
-            }
-            for (const fn of waiters) {
-                if (this._isActive())
-                    fn();
-            }
-        });
-    }
+    
 
     
 
