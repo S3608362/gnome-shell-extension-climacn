@@ -3,7 +3,9 @@ import Adw from 'gi://Adw';
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk';
 
-import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
+import {
+    ExtensionPreferences
+} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 const SOURCE_VALUES = ['auto', 'qweather', 'openmeteo'];
 const SOURCE_LABELS = ['自动', '和风天气', 'Open-Meteo'];

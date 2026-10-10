@@ -3,8 +3,28 @@ import GLib from 'gi://GLib';
 import Cairo from 'gi://cairo';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
-import { BAND_DOT_COLORS, DAY_MINUTES, MOON_DISC_RADIUS, MOON_LEGEND, SUN_LEGEND, bandRatio, bandSkyColorAt, moonArcPosition, moonUpSpans } from '../lib/astro.js';
-import { BAND_HEIGHT, BAND_KNOB_R, BAND_NOW_H, BAND_NOW_W, BAND_RADIUS, BAND_STOPS, drawMoonDisc, roundedRectPath, themeColor } from '../lib/drawing.js';
+import {
+    BAND_DOT_COLORS,
+    DAY_MINUTES,
+    MOON_DISC_RADIUS,
+    MOON_LEGEND,
+    SUN_LEGEND,
+    bandRatio,
+    bandSkyColorAt,
+    moonArcPosition,
+    moonUpSpans
+} from '../lib/astro.js';
+import {
+    BAND_HEIGHT,
+    BAND_KNOB_R,
+    BAND_NOW_H,
+    BAND_NOW_W,
+    BAND_RADIUS,
+    BAND_STOPS,
+    drawMoonDisc,
+    roundedRectPath,
+    themeColor
+} from '../lib/drawing.js';
 import { formatClock } from '../lib/util.js';
 
 export class SunMoonBands {

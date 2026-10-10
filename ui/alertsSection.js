@@ -1,4 +1,13 @@
-import { ALERT_DETAIL_FAILED, ALERT_DETAIL_WIDTH, ALERT_MAX_FAILURES, findNearestStation, getCmaAlertDetailUrl, getCmaAlertsUrl, parseAlertDetail, parseAlerts } from '../lib/alerts.js';
+import {
+    ALERT_DETAIL_FAILED,
+    ALERT_DETAIL_WIDTH,
+    ALERT_MAX_FAILURES,
+    findNearestStation,
+    getCmaAlertDetailUrl,
+    getCmaAlertsUrl,
+    parseAlertDetail,
+    parseAlerts
+} from '../lib/alerts.js';
 import { logError } from '../lib/util.js';
 import { gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
 import St from 'gi://St';

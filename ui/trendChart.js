@@ -3,7 +3,19 @@ import Cairo from 'gi://cairo';
 import PangoCairo from 'gi://PangoCairo';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
-import { COLOR_HIGH, COLOR_LOW, MOON_STRIP_HEIGHT, TEMP_RAMP, TREND_CHART_HEIGHT, TREND_CHART_WIDTH, TREND_LABEL_PX, cairoFontDescription, drawCenteredText, drawMoonDisc, themeColor } from '../lib/drawing.js';
+import {
+    COLOR_HIGH,
+    COLOR_LOW,
+    MOON_STRIP_HEIGHT,
+    TEMP_RAMP,
+    TREND_CHART_HEIGHT,
+    TREND_CHART_WIDTH,
+    TREND_LABEL_PX,
+    cairoFontDescription,
+    drawCenteredText,
+    drawMoonDisc,
+    themeColor
+} from '../lib/drawing.js';
 
 export class TrendChart {
     constructor(owner) {

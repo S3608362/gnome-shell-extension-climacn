@@ -12,16 +12,60 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { parseStationList } from './lib/alerts.js';
-import { AQI_FONT_PX, AQI_MAX_FAILURES, AQI_RING_SIZE, aqiFillRatio, chinaAqiFromHourly, parseAqiIndex } from './lib/aqi.js';
+import {
+    AQI_FONT_PX,
+    AQI_MAX_FAILURES,
+    AQI_RING_SIZE,
+    aqiFillRatio,
+    chinaAqiFromHourly,
+    parseAqiIndex
+} from './lib/aqi.js';
 import { parseAstro, parseMoonPhases, parseTrendPoints } from './lib/astro.js';
-import { TEMP_BAR_HEIGHT, TEMP_BAR_WIDTH, TEMP_RAMP, cairoFontDescription, roundedBarPath } from './lib/drawing.js';
-import { BATTERY_INTERVAL_SEC, CACHE_TTL_SEC, DAILY_REQUEST_BUDGET, FORECAST_ROWS, MANUAL_COOLDOWN_SEC, UPDATE_INTERVAL_SEC, compassToChinese, currentRequestCount, formatMeasure, getAirQualityUrl, getForecastUrl, getWeatherUrl, logError, migrateSourceSettings, nextRequestCount, normalizeHost, roundTemp, safeIconCode, setDebugLogging, toFiniteOrNull, toPercent } from './lib/util.js';
+import {
+    TEMP_BAR_HEIGHT,
+    TEMP_BAR_WIDTH,
+    TEMP_RAMP,
+    cairoFontDescription,
+    roundedBarPath
+} from './lib/drawing.js';
+import {
+    BATTERY_INTERVAL_SEC,
+    CACHE_TTL_SEC,
+    DAILY_REQUEST_BUDGET,
+    FORECAST_ROWS,
+    MANUAL_COOLDOWN_SEC,
+    UPDATE_INTERVAL_SEC,
+    compassToChinese,
+    currentRequestCount,
+    formatMeasure,
+    getAirQualityUrl,
+    getForecastUrl,
+    getWeatherUrl,
+    logError,
+    migrateSourceSettings,
+    nextRequestCount,
+    normalizeHost,
+    roundTemp,
+    safeIconCode,
+    setDebugLogging,
+    toFiniteOrNull,
+    toPercent
+} from './lib/util.js';
 import { AlertsSection } from './ui/alertsSection.js';
 import { CitySearchSection } from './ui/citySearchSection.js';
 import { CalendarSection } from './ui/calendarSection.js';
 import { SunMoonBands } from './ui/sunMoonBands.js';
 import { TrendChart } from './ui/trendChart.js';
-import { appendPressureSample, formatPressureTrend, getOpenMeteoAirQualityUrl, getOpenMeteoUrl, openMeteoAsQweatherCurrent, openMeteoAsQweatherDaily, parsePressureHistory, pressureTrend } from './lib/weather.js';
+import {
+    appendPressureSample,
+    formatPressureTrend,
+    getOpenMeteoAirQualityUrl,
+    getOpenMeteoUrl,
+    openMeteoAsQweatherCurrent,
+    openMeteoAsQweatherDaily,
+    parsePressureHistory,
+    pressureTrend
+} from './lib/weather.js';
 
 export default class ClimaCNExtension extends Extension {
     _isActive() {
