@@ -2212,9 +2212,8 @@ export default class ClimaCNExtension extends Extension {
 
             if (!col) {
                 const names = cols.map(c => c.trim());
-                if (!names.includes('Location_ID')) continue;
+                if (!names.includes('Location_Name_ZH')) continue;
                 col = {
-                    id: names.indexOf('Location_ID'),
                     name: names.indexOf('Location_Name_ZH'),
                     adm1: names.indexOf('Adm1_Name_ZH'),
                     adm2: names.indexOf('Adm2_Name_ZH'),
@@ -2228,7 +2227,6 @@ export default class ClimaCNExtension extends Extension {
                 continue;
             }
 
-            const id = cols[col.id].trim();
             const name = cols[col.name].trim();
             const adm1 = cols[col.adm1].trim();
             const adm2 = col.adm2 < 0 ? '' : cols[col.adm2].trim();
@@ -2236,7 +2234,7 @@ export default class ClimaCNExtension extends Extension {
             const lon = toFiniteOrNull(cols[col.lon]);
             if (!name || !adm1) continue;
             if (lat === null || lon === null) continue;
-            cities.push({ id, name, adm1, adm2, lat, lon });
+            cities.push({ name, adm1, adm2, lat, lon });
         }
         this._cityData = cities;
     }
