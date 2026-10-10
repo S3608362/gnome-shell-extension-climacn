@@ -1,5 +1,3 @@
-
-
 import St from 'gi://St';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -13,846 +11,22 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const UPDATE_INTERVAL_SEC = 15 * 60;
-const BATTERY_INTERVAL_SEC = 30 * 60;
-const CACHE_TTL_SEC = 5 * 60;
-const MANUAL_COOLDOWN_SEC = 60;
-const DAILY_REQUEST_BUDGET = 800;
-const AQI_RING_SIZE = 34;
-const AQI_FONT_PX = 10;
-const AQI_MAX_FAILURES = 2;
-const FORECAST_DAYS = 10;
-const FORECAST_ROWS = 3;
-
-const CALENDAR_COLS = 4;
-
-const BAND_HEIGHT = 34;
-const BAND_RADIUS = 6;
-const BAND_KNOB_R = 5;
-const BAND_NOW_W = 3;
-const BAND_NOW_H = 22;
-const BAND_STOPS = 96;
-const BAND_RAMP = 0.16;
-const DAY_MINUTES = 24 * 60;
-const MOON_DISC_RADIUS = 7;
-
-function bandRatio(minutes) {
-    const m = toFiniteOrNull(minutes);
-    if (m === null)
-        return null;
-    return Math.min(Math.max(m / DAY_MINUTES, 0), 1);
-}
-
-function bandSkyColorAt(ratio, astro) {
-    const sunrise = astro.sunrise / DAY_MINUTES;
-    const sunset = astro.sunset / DAY_MINUTES;
-    if (ratio >= sunrise && ratio <= sunset)
-        return SKY_DAY;
-
-    const d = ratio < sunrise ? sunrise - ratio : ratio - sunset;
-    const last = BAND_RAMP_COLORS.length - 1;
-    const scaled = Math.min(d / BAND_RAMP, 1) * last;
-    const i = Math.min(Math.floor(scaled), last - 1);
-    const f = scaled - i;
-    const a = BAND_RAMP_COLORS[i];
-    const b = BAND_RAMP_COLORS[i + 1];
-    const e = f * f * (3 - 2 * f);
-    return [
-        a[0] + (b[0] - a[0]) * e,
-        a[1] + (b[1] - a[1]) * e,
-        a[2] + (b[2] - a[2]) * e,
-    ];
-}
-
-function moonUpSpans(moon) {
-    const spans = [];
-    const end = Math.min(moon.moonset, DAY_MINUTES);
-    if (end > moon.moonrise)
-        spans.push([moon.moonrise, end]);
-    if (moon.moonset > DAY_MINUTES)
-        spans.push([0, moon.moonset - DAY_MINUTES]);
-    return spans;
-}
-
-const SKY_ASTRONOMY = [0.22, 0.26, 0.52];
-const SKY_NAUTICAL  = [0.30, 0.38, 0.68];
-const SKY_CIVIL     = [0.58, 0.52, 0.76];
-const SKY_DAY       = [1.00, 0.72, 0.20];
-
-const BAND_RAMP_COLORS = [SKY_DAY, SKY_CIVIL, SKY_NAUTICAL, SKY_ASTRONOMY];
-
-const BAND_DOT_COLORS = {
-    astro: [0.3608, 0.4000, 0.6902],
-    civil: [0.6353, 0.5843, 0.8000],
-    day:   [1.0000, 0.7216, 0.2000],
-    moon:  [0.6039, 0.6000, 0.6588],
-};
-
-const SUN_LEGEND = [
-    { key: 'astro', label: '天文晨', field: 'astronomicalDawn' },
-    { key: 'civil', label: '民用晨', field: 'civilDawn' },
-    { key: 'day',   label: '日出',   field: 'sunrise' },
-    { key: 'day',   label: '日落',   field: 'sunset' },
-    { key: 'civil', label: '民用暮', field: 'civilDusk' },
-    { key: 'astro', label: '天文暮', field: 'astronomicalDusk' },
-];
-
-const MOON_LEGEND = [
-    { key: 'moon', label: '月出' },
-    { key: 'moon', label: '月落' },
-    { key: 'moon', label: '月相' },
-];
-
-const MOON_LIT_ALPHA = 0.85;
-const MOON_DARK_ALPHA = 0.16;
-const TREND_CHART_HEIGHT = 64;
-const TREND_CHART_WIDTH = 400;
-const TREND_LABEL_PX = 8;
-const MOON_STRIP_HEIGHT = 30;
-const TEMP_BAR_HEIGHT = 8;
-
-const TEMP_BAR_WIDTH = 110;
-
-const COLOR_HIGH = [0.95, 0.55, 0.20];
-const COLOR_LOW = [0.30, 0.60, 0.95];
-
-const TEMP_RAMP = [
-    [0.00, 0.30, 0.60, 0.95],
-    [0.35, 0.35, 0.80, 0.85],
-    [0.60, 0.95, 0.85, 0.30],
-    [1.00, 0.95, 0.55, 0.20],
-];
-
-const OPEN_METEO_HOST = 'https://api.open-meteo.com';
-const OPEN_METEO_AQI_HOST = 'https://air-quality-api.open-meteo.com';
-
-const OPEN_METEO_FORECAST_DAYS = 16;
-
-const SOURCE_KEYS = ['source-current', 'source-forecast',
-                     'source-air-quality', 'source-astronomy'];
-const SETTINGS_VERSION = 1;
-
-function migrateSourceSettings(settings) {
-    if (settings.get_int('settings-version') >= SETTINGS_VERSION)
-        return;
-    const legacy = settings.get_user_value('use-open-meteo-fallback');
-    const target = legacy && legacy.get_boolean() ? 'auto' : 'qweather';
-    for (const key of SOURCE_KEYS)
-        settings.set_string(key, target);
-    settings.set_int('settings-version', SETTINGS_VERSION);
-}
-
-let _debug = false;
-
-function setDebugLogging(enabled) {
-    _debug = !!enabled;
-}
-
-function logError(...args) {
-    if (_debug)
-        console.error('[ClimaCN]', ...args);
-}
-
-function getWeatherUrl(host, lat, lon) {
-    return `${host}/weather/v1/current/${formatCoord(lat)}/${formatCoord(lon)}?localTime=true`;
-}
-
-function getForecastUrl(host, lat, lon) {
-    return `${host}/weather/v1/daily/${formatCoord(lat)}/${formatCoord(lon)}?days=${FORECAST_DAYS}&localTime=true`;
-}
-
-function formatCoord(value) {
-    const n = toFiniteOrNull(value);
-    return n === null ? '0.00' : n.toFixed(2);
-}
-
-function normalizeHost(raw) {
-    const host = (raw || '').trim()
-        .replace(/^https?:\/\//i, '')
-        .split('/')[0];
-    if (!host)
-        return '';
-    return `https://${host}`;
-}
-
-const COMPASS_ZH = {
-    n: '北风', nne: '东北偏北风', ne: '东北风', ene: '东北偏东风',
-    e: '东风', ese: '东南偏东风', se: '东南风', sse: '东南偏南风',
-    s: '南风', ssw: '西南偏南风', sw: '西南风', wsw: '西南偏西风',
-    w: '西风', wnw: '西北偏西风', nw: '西北风', nnw: '西北偏北风',
-    none: '无持续风向', vrb: '风向不定',
-};
-
-function compassToChinese(code) {
-    return COMPASS_ZH[String(code || '').toLowerCase()] || '--';
-}
-
-function toPercent(value) {
-    const n = toFiniteOrNull(value);
-    return n === null ? '--%' : `${Math.round(n * 100)}%`;
-}
-
-function toFiniteOrNull(value) {
-    if (value === null || value === undefined)
-        return null;
-    if (typeof value === 'string') {
-        if (value.trim() === '')
-            return null;
-    } else if (typeof value !== 'number') {
-        return null;
-    }
-    const n = Number(value);
-    return Number.isFinite(n) ? n : null;
-}
-
-function roundTemp(value) {
-    const n = toFiniteOrNull(value);
-    return n === null ? '--°' : `${Math.round(n)}°`;
-}
-
-function formatMeasure(obj, fallback = '--') {
-    const n = toFiniteOrNull(obj?.value);
-    if (n === null)
-        return fallback;
-    return obj?.unit ? `${Math.round(n)} ${obj.unit}` : `${Math.round(n)}`;
-}
-
-function safeIconCode(code) {
-    const s = String(code ?? '');
-    return /^[0-9A-Za-z]+$/.test(s) ? s : '999';
-}
-
-function currentRequestCount(storedDate, storedCount, today) {
-    return storedDate === today ? storedCount : 0;
-}
-
-function nextRequestCount(storedDate, storedCount, today) {
-    return storedDate === today ? storedCount + 1 : 1;
-}
-
-function getAirQualityUrl(host, lat, lon) {
-    return `${host}/airquality/v1/current/${formatCoord(lat)}/${formatCoord(lon)}`;
-}
-
-function parseAqiIndex(json) {
-    const list = Array.isArray(json?.indexes) ? json.indexes : [];
-    if (list.length === 0)
-        return null;
-    const idx = list.find(i => i?.code === 'qaqi') ?? list[0];
-    const aqi = toFiniteOrNull(idx?.aqi);
-    if (aqi === null)
-        return null;
-    const c = idx?.color ?? {};
-    const channel = v => (toFiniteOrNull(v) ?? 128);
-    const pp = idx?.primaryPollutant;
-    const ppCode = String(pp?.code ?? '').trim().toLowerCase();
-    return {
-        aqi,
-        display: idx?.aqiDisplay || String(Math.round(aqi)),
-        category: idx?.category || '',
-        primary: aqi > 50 && ppCode && ppCode !== 'na'
-            ? String(pp?.name ?? '').trim()
-            : '',
-        color: { r: channel(c.red), g: channel(c.green), b: channel(c.blue) },
-    };
-}
-
-function aqiFillRatio(aqi) {
-    const n = toFiniteOrNull(aqi);
-    if (n === null)
-        return 0;
-    return Math.min(Math.max(n, 0), 300) / 300;
-}
-
-const AQI_LEVELS = [0, 50, 100, 150, 200, 300, 400, 500];
-
-const AQI_BREAKPOINTS = {
-    pm25: [0, 35, 75, 115, 150, 250, 350, 500],
-    pm10: [0, 50, 150, 250, 350, 420, 500, 600],
-    so2:  [0, 50, 150, 475, 800, 1600, 2100, 2620],
-    no2:  [0, 40, 80, 180, 280, 565, 750, 940],
-    co:   [0, 2, 4, 14, 24, 36, 48, 60],
-    o3:   [0, 100, 160, 215, 265, 800],
-};
-
-const AQI_POLLUTANT_SHORT = {
-    pm25: 'PM2.5',
-    pm10: 'PM10',
-    so2: 'SO₂',
-    no2: 'NO₂',
-    co: 'CO',
-    o3: 'O₃',
-};
-
-const AQI_CATEGORIES = [
-    [50,  '优',       [0.00, 0.89, 0.00]],
-    [100, '良',       [1.00, 1.00, 0.00]],
-    [150, '轻度污染', [1.00, 0.49, 0.00]],
-    [200, '中度污染', [1.00, 0.00, 0.00]],
-    [300, '重度污染', [0.56, 0.25, 0.59]],
-    [Infinity, '严重污染', [0.49, 0.00, 0.14]],
-];
-
-function aqiCategory(aqi) {
-    for (const [limit, name] of AQI_CATEGORIES) {
-        if (aqi <= limit)
-            return name;
-    }
-    return AQI_CATEGORIES[AQI_CATEGORIES.length - 1][1];
-}
-
-function aqiColor(aqi) {
-    for (const [limit, , rgb] of AQI_CATEGORIES) {
-        if (aqi <= limit)
-            return { r: rgb[0] * 255, g: rgb[1] * 255, b: rgb[2] * 255 };
-    }
-    return { r: 126, g: 0, b: 36 };
-}
-
-function iaqiFrom(concentration, table) {
-    const c = toFiniteOrNull(concentration);
-    if (c === null || c < 0)
-        return null;
-    for (let i = 1; i < table.length; i++) {
-        if (c <= table[i]) {
-            const lo = table[i - 1];
-            const hi = table[i];
-            const loI = AQI_LEVELS[i - 1];
-            const hiI = AQI_LEVELS[i];
-            return Math.round(loI + (hiI - loI) * (c - lo) / (hi - lo));
-        }
-    }
-    return AQI_LEVELS[table.length - 1];
-}
-
-function meanOf(values) {
-    const nums = (Array.isArray(values) ? values : [])
-        .map(toFiniteOrNull)
-        .filter(v => v !== null);
-    if (nums.length === 0)
-        return null;
-    return nums.reduce((a, b) => a + b, 0) / nums.length;
-}
-
-function chinaAqiFromHourly(nowIso, aq) {
-    const hourly = aq?.hourly ?? {};
-    const upto = lastHourlyIndex(hourly.time, nowIso);
-    if (upto < 0)
-        return null;
-
-    const tail = (key, n) => {
-        const arr = hourly[key];
-        if (!Array.isArray(arr))
-            return null;
-        return arr.slice(Math.max(0, upto - n + 1), upto + 1);
-    };
-
-    const coRaw = meanOf(tail('carbon_monoxide', 24));
-    const readings = [
-        ['pm25', iaqiFrom(meanOf(tail('pm2_5', 24)), AQI_BREAKPOINTS.pm25)],
-        ['pm10', iaqiFrom(meanOf(tail('pm10', 24)), AQI_BREAKPOINTS.pm10)],
-        ['so2',  iaqiFrom(meanOf(tail('sulphur_dioxide', 24)), AQI_BREAKPOINTS.so2)],
-        ['no2',  iaqiFrom(meanOf(tail('nitrogen_dioxide', 24)), AQI_BREAKPOINTS.no2)],
-        ['co',   iaqiFrom(coRaw === null ? null : coRaw / 1000, AQI_BREAKPOINTS.co)],
-        ['o3',   iaqiFrom(meanOf(tail('ozone', 8)), AQI_BREAKPOINTS.o3)],
-    ].filter(e => e[1] !== null);
-
-    if (readings.length === 0)
-        return null;
-
-    const [primaryKey, aqi] = readings.reduce((a, b) => (b[1] > a[1] ? b : a));
-    return {
-        aqi,
-        display: String(aqi),
-        category: aqiCategory(aqi),
-        primary: aqi > 50 ? (AQI_POLLUTANT_SHORT[primaryKey] ?? '') : '',
-        color: aqiColor(aqi),
-    };
-}
-
-const PRESSURE_WINDOW_SEC = 3 * 3600;
-const PRESSURE_MAX_SAMPLES = 24;
-const PRESSURE_STEADY_HPA = 1.0;
-const PRESSURE_MIN_SPAN_SEC = 30 * 60;
-
-function parsePressureHistory(raw) {
-    try {
-        const arr = JSON.parse(raw || '[]');
-        if (!Array.isArray(arr))
-            return [];
-        return arr
-            .map(e => ({ t: toFiniteOrNull(e?.t), p: toFiniteOrNull(e?.p) }))
-            .filter(e => e.t !== null && e.p !== null)
-            .sort((a, b) => a.t - b.t);
-    } catch (_e) {
-        return [];
-    }
-}
-
-function appendPressureSample(history, t, p) {
-    const cutoff = t - PRESSURE_WINDOW_SEC;
-    const kept = history.filter(e => e.t >= cutoff);
-    kept.push({ t, p });
-    return kept.slice(-PRESSURE_MAX_SAMPLES);
-}
-
-function pressureTrend(history, currentP, nowSec) {
-    if (!Number.isFinite(currentP) || history.length === 0)
-        return null;
-    const cutoff = nowSec - PRESSURE_WINDOW_SEC;
-    const base = history.find(e => e.t >= cutoff);
-    if (!base || nowSec - base.t < PRESSURE_MIN_SPAN_SEC)
-        return null;
-    const delta = currentP - base.p;
-    const dir = Math.abs(delta) < PRESSURE_STEADY_HPA
-        ? 'steady'
-        : (delta > 0 ? 'rising' : 'falling');
-    return { delta, dir };
-}
-
-function formatPressureTrend(trend) {
-    if (!trend)
-        return '';
-    if (trend.dir === 'steady')
-        return '→';
-    return `${trend.dir === 'rising' ? '↑' : '↓'}${Math.abs(trend.delta).toFixed(1)}`;
-}
-
-function parseClockMinutes(iso) {
-    const m = /T(\d{2}):(\d{2})/.exec(String(iso ?? ''));
-    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
-}
-
-function formatClock(minutes) {
-    const n = toFiniteOrNull(minutes);
-    if (n === null)
-        return '--:--';
-    const h = Math.floor(n / 60) % 24;
-    const m = Math.round(n % 60);
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-}
-
-const MOON_PHASES = {
-    'new-moon':        { name: '新月',   lit: 0.000, waxing: true  },
-    'waxing-crescent': { name: '蛾眉月', lit: 0.146, waxing: true  },
-    'first-quarter':   { name: '上弦月', lit: 0.500, waxing: true  },
-    'waxing-gibbous':  { name: '盈凸月', lit: 0.854, waxing: true  },
-    'full-moon':       { name: '满月',   lit: 1.000, waxing: true  },
-    'waning-gibbous':  { name: '亏凸月', lit: 0.854, waxing: false },
-    'last-quarter':    { name: '下弦月', lit: 0.500, waxing: false },
-    'waning-crescent': { name: '残月',   lit: 0.146, waxing: false },
-};
-
-function parseMoon(astro) {
-    let moonrise = parseClockMinutes(astro?.moonrise);
-    let moonset = parseClockMinutes(astro?.moonset);
-    if (moonrise === null || moonset === null)
-        return null;
-    if (moonset <= moonrise)
-        moonset += 24 * 60;
-
-    const base = MOON_PHASES[astro?.moonPhase] ?? null;
-    if (!base)
-        return { moonrise, moonset, phase: null };
-
-    const lit = toFiniteOrNull(astro?.moonLit);
-    return {
-        moonrise, moonset,
-        phase: {
-            name: base.name,
-            waxing: base.waxing,
-            lit: lit ?? base.lit,
-        },
-    };
-}
-
-function parseAstro(days) {
-    const astro = Array.isArray(days) ? days[0]?.astro : null;
-    if (!astro)
-        return null;
-    const sunrise = parseClockMinutes(astro.sunrise);
-    const sunset = parseClockMinutes(astro.sunset);
-    if (sunrise === null || sunset === null || sunset <= sunrise)
-        return null;
-    return {
-        sunrise, sunset,
-        civilDawn: parseClockMinutes(astro.civilDawn),
-        civilDusk: parseClockMinutes(astro.civilDusk),
-        nauticalDawn: parseClockMinutes(astro.nauticalDawn),
-        nauticalDusk: parseClockMinutes(astro.nauticalDusk),
-        astronomicalDawn: parseClockMinutes(astro.astronomicalDawn),
-        astronomicalDusk: parseClockMinutes(astro.astronomicalDusk),
-        moon: parseMoon(astro),
-    };
-}
-
-function moonArcPosition(nowMinutes, moon) {
-    if (!moon)
-        return null;
-    const now = nowMinutes < moon.moonrise ? nowMinutes + 24 * 60 : nowMinutes;
-    const ratio = (now - moon.moonrise) / (moon.moonset - moon.moonrise);
-    return {
-        ratio: Math.min(Math.max(ratio, 0), 1),
-        isUp: now >= moon.moonrise && now <= moon.moonset,
-    };
-}
-
-function parseMoonPhases(days) {
-    if (!Array.isArray(days))
-        return [];
-    return days.map(d => MOON_PHASES[d?.astro?.moonPhase] ?? null);
-}
-
-function parseTrendPoints(days) {
-    if (!Array.isArray(days))
-        return [];
-    return days.map(d => {
-        const rawMin = d?.temperatureMin?.value;
-        const rawMax = d?.temperatureMax?.value;
-        if (rawMin === null || rawMin === undefined ||
-            rawMax === null || rawMax === undefined)
-            return null;
-        const min = Number(rawMin);
-        const max = Number(rawMax);
-        return Number.isFinite(min) && Number.isFinite(max) ? { min, max } : null;
-    });
-}
-
-const WMO_TO_QWEATHER_DAY = {
-    0: '100', 1: '102', 2: '101', 3: '104',
-    45: '501', 48: '501',
-    51: '309', 53: '309', 55: '309', 56: '313', 57: '313',
-    61: '305', 63: '306', 65: '307', 66: '313', 67: '313',
-    71: '400', 73: '401', 75: '402', 77: '407',
-    80: '300', 81: '301', 82: '310',
-    85: '407', 86: '407',
-    95: '302', 96: '304', 99: '304',
-};
-
-const WMO_TO_QWEATHER_NIGHT = { 0: '150', 1: '152', 2: '151' };
-
-const WMO_TEXT_ZH = {
-    0: '晴', 1: '少云', 2: '多云', 3: '阴',
-    45: '雾', 48: '雾凇',
-    51: '毛毛雨', 53: '毛毛雨', 55: '毛毛雨', 56: '冻毛毛雨', 57: '冻毛毛雨',
-    61: '小雨', 63: '中雨', 65: '大雨', 66: '冻雨', 67: '冻雨',
-    71: '小雪', 73: '中雪', 75: '大雪', 77: '米雪',
-    80: '阵雨', 81: '强阵雨', 82: '暴雨',
-    85: '阵雪', 86: '强阵雪',
-    95: '雷阵雨', 96: '雷阵雨伴冰雹', 99: '雷阵雨伴冰雹',
-};
-
-function wmoToQweatherCode(code, isDay = true) {
-    const c = toFiniteOrNull(code);
-    if (c === null)
-        return '999';
-    if (!isDay && WMO_TO_QWEATHER_NIGHT[c])
-        return WMO_TO_QWEATHER_NIGHT[c];
-    return WMO_TO_QWEATHER_DAY[c] ?? '999';
-}
-
-function wmoToText(code) {
-    const c = toFiniteOrNull(code);
-    return c === null ? '--' : (WMO_TEXT_ZH[c] ?? '--');
-}
-
-const COMPASS_CODES = ['n', 'nne', 'ne', 'ene', 'e', 'ese', 'se', 'sse',
-                       's', 'ssw', 'sw', 'wsw', 'w', 'wnw', 'nw', 'nnw'];
-
-function degreesToCompass(degrees) {
-    const d = toFiniteOrNull(degrees);
-    if (d === null)
-        return 'none';
-    const normalized = ((d % 360) + 360) % 360;
-    return COMPASS_CODES[Math.round(normalized / 22.5) % 16];
-}
-
-const BEAUFORT_MAX_MS = [0.2, 1.5, 3.3, 5.4, 7.9, 10.7, 13.8, 17.1,
-                         20.7, 24.4, 28.4, 32.6];
-
-function beaufortFromMs(ms) {
-    const v = toFiniteOrNull(ms);
-    if (v === null || v < 0)
-        return null;
-    for (let i = 0; i < BEAUFORT_MAX_MS.length; i++) {
-        if (v <= BEAUFORT_MAX_MS[i])
-            return i;
-    }
-    return 12;
-}
-
-function lastHourlyIndex(times, nowIso) {
-    if (!Array.isArray(times) || !nowIso)
-        return -1;
-    const key = String(nowIso).slice(0, 13);
-    let idx = -1;
-    for (let i = 0; i < times.length; i++) {
-        if (String(times[i]).slice(0, 13) <= key)
-            idx = i;
-        else
-            break;
-    }
-    return idx;
-}
-
-function getOpenMeteoUrl(lat, lon) {
-    const query = [
-        'current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,' +
-            'precipitation,weather_code,cloud_cover,pressure_msl,' +
-            'wind_speed_10m,wind_direction_10m,wind_gusts_10m',
-        'hourly=dew_point_2m,visibility,uv_index',
-        'daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,' +
-            'uv_index_max,moonrise,moonset,moon_phase',
-        'wind_speed_unit=ms',
-        `forecast_days=${OPEN_METEO_FORECAST_DAYS}`,
-        'timezone=auto',
-    ].join('&');
-    return `${OPEN_METEO_HOST}/v1/forecast?latitude=${formatCoord(lat)}&longitude=${formatCoord(lon)}&${query}`;
-}
-
-function getOpenMeteoAirQualityUrl(lat, lon) {
-    const query = [
-        'hourly=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone',
-        'past_days=1',
-        'forecast_days=1',
-        'timezone=auto',
-    ].join('&');
-    return `${OPEN_METEO_AQI_HOST}/v1/air-quality?latitude=${formatCoord(lat)}&longitude=${formatCoord(lon)}&${query}`;
-}
-
-function openMeteoAsQweatherCurrent(json, nowIso) {
-    const cur = json?.current ?? {};
-    const hourly = json?.hourly ?? {};
-    const hi = lastHourlyIndex(hourly.time, nowIso);
-    const at = key => (hi >= 0 && Array.isArray(hourly[key]) ? hourly[key][hi] : null);
-    const num = v => toFiniteOrNull(v);
-    const humidity = num(cur.relative_humidity_2m);
-    const cloud = num(cur.cloud_cover);
-
-    return {
-        condition: {
-            code: wmoToQweatherCode(cur.weather_code, cur.is_day !== 0),
-            text: wmoToText(cur.weather_code),
-        },
-        temperature: { value: num(cur.temperature_2m) },
-        feelsLike: { value: num(cur.apparent_temperature) },
-        humidity: humidity === null ? null : humidity / 100,
-        cloudCover: cloud === null ? null : cloud / 100,
-        wind: {
-            direction: { compass: degreesToCompass(cur.wind_direction_10m) },
-            scale: beaufortFromMs(cur.wind_speed_10m),
-        },
-        pressure: { value: num(cur.pressure_msl), unit: 'hPa' },
-        visibility: { value: num(at('visibility')), unit: 'm' },
-        dewPoint: { value: num(at('dew_point_2m')) },
-        uvIndex: num(at('uv_index')),
-        windGust: { value: num(cur.wind_gusts_10m), unit: 'm/s' },
-        precipitation: { amount: { value: num(cur.precipitation), unit: 'mm' } },
-    };
-}
-
-const MOON_PHASE_CENTERS = [
-    ['new-moon', 0.000], ['waxing-crescent', 0.125], ['first-quarter', 0.250],
-    ['waxing-gibbous', 0.375], ['full-moon', 0.500], ['waning-gibbous', 0.625],
-    ['last-quarter', 0.750], ['waning-crescent', 0.875],
-];
-
-function moonPhaseFromFraction(p) {
-    const v = toFiniteOrNull(p);
-    if (v === null)
-        return null;
-    const f = ((v % 1) + 1) % 1;
-    let name = MOON_PHASE_CENTERS[0][0];
-    let best = Infinity;
-    for (const [candidate, center] of MOON_PHASE_CENTERS) {
-        const raw = Math.abs(center - f);
-        const d = Math.min(raw, 1 - raw);
-        if (d < best) {
-            best = d;
-            name = candidate;
-        }
-    }
-    return {
-        name,
-        lit: (1 - Math.cos(2 * Math.PI * f)) / 2,
-        waxing: f < 0.5,
-    };
-}
-
-function openMeteoAsQweatherDaily(json) {
-    const d = json?.daily ?? {};
-    const times = Array.isArray(d.time) ? d.time : [];
-    const num = v => toFiniteOrNull(v);
-    return times.map((date, i) => {
-        const phase = moonPhaseFromFraction(d.moon_phase?.[i]);
-        return {
-            astro: {
-                sunrise: d.sunrise?.[i],
-                sunset: d.sunset?.[i],
-                moonrise: d.moonrise?.[i],
-                moonset: d.moonset?.[i],
-                moonPhase: phase?.name ?? null,
-                moonLit: phase?.lit ?? null,
-            },
-            daytime: {
-                condition: {
-                    code: wmoToQweatherCode(d.weather_code?.[i], true),
-                    text: wmoToText(d.weather_code?.[i]),
-                },
-            },
-            temperatureMin: { value: num(d.temperature_2m_min?.[i]) },
-            temperatureMax: { value: num(d.temperature_2m_max?.[i]) },
-            _date: date,
-        };
-    });
-}
-
-function cairoFontDescription(themeFont, sizePx, scaleFactor) {
-    let font = null;
-    try {
-        font = themeFont?.copy() ?? null;
-    } catch (_e) {
-        font = null;
-    }
-    if (!font || !font.get_family())
-        font = Pango.FontDescription.from_string('Sans');
-    font.set_absolute_size(Math.round(sizePx * scaleFactor) * Pango.SCALE);
-    return font;
-}
-
-function drawCenteredText(cr, layout, text, x, y) {
-    layout.set_text(String(text), -1);
-    const [textW, textH] = layout.get_pixel_size();
-    cr.moveTo(Math.round(x - textW / 2), Math.round(y - textH / 2));
-    PangoCairo.show_layout(cr, layout);
-}
-
-function parseCsvLine(line) {
-    const fields = [];
-    let field = '';
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-        const ch = line[i];
-        if (inQuotes) {
-            if (ch !== '"') {
-                field += ch;
-            } else if (line[i + 1] === '"') {
-                field += '"';
-                i++;
-            } else {
-                inQuotes = false;
-            }
-        } else if (ch === '"') {
-            inQuotes = true;
-        } else if (ch === ',') {
-            fields.push(field);
-            field = '';
-        } else {
-            field += ch;
-        }
-    }
-    fields.push(field);
-    return fields;
-}
-
-const CMA_ALERT_HOST = 'https://weather.cma.cn';
-const ALERT_MAX_FAILURES = 3;
-
-const ALERT_DETAIL_WIDTH = 400;
-
-const ALERT_DETAIL_FAILED = { failed: true };
-
-const ALERT_MAX_DISTANCE_KM = 150;
-
-const ALERT_LEVELS = {
-    BLUE:   { key: 'blue',   zh: '蓝色', rank: 1 },
-    YELLOW: { key: 'yellow', zh: '黄色', rank: 2 },
-    ORANGE: { key: 'orange', zh: '橙色', rank: 3 },
-    RED:    { key: 'red',    zh: '红色', rank: 4 },
-};
-const ALERT_LEVEL_UNKNOWN = { key: 'unknown', zh: '', rank: 0 };
-
-function alertLevel(severity) {
-    return ALERT_LEVELS[String(severity ?? '').toUpperCase()] ?? ALERT_LEVEL_UNKNOWN;
-}
-
-function getCmaAlertsUrl(stationId) {
-    return `${CMA_ALERT_HOST}/api/weather/view?stationid=${encodeURIComponent(stationId)}`;
-}
-
-function getCmaAlertDetailUrl(alertId) {
-    return `${CMA_ALERT_HOST}/api/alarm/${encodeURIComponent(alertId)}`;
-}
-
-function parseStationList(csvText) {
-    const out = [];
-    for (const line of String(csvText ?? '').split('\n')) {
-        if (!line || line.startsWith('#') || line.startsWith('Station_ID'))
-            continue;
-        const [rawId, rawName, rawLat, rawLon] = line.split(',');
-        const lat = toFiniteOrNull(rawLat);
-        const lon = toFiniteOrNull(rawLon);
-        if (!rawId?.trim() || lat === null || lon === null)
-            continue;
-        out.push({ id: rawId.trim(), name: (rawName ?? '').trim(), lat, lon });
-    }
-    return out;
-}
-
-function findNearestStation(stations, lat, lon, maxKm = ALERT_MAX_DISTANCE_KM) {
-    const la = toFiniteOrNull(lat);
-    const lo = toFiniteOrNull(lon);
-    if (!Array.isArray(stations) || stations.length === 0 || la === null || lo === null)
-        return null;
-
-    const kx = Math.cos(la * Math.PI / 180);
-    let best = null;
-    for (const s of stations) {
-        const dy = s.lat - la;
-        const dx = (s.lon - lo) * kx;
-        const d2 = dx * dx + dy * dy;
-        if (!best || d2 < best.d2)
-            best = { d2, station: s };
-    }
-    const km = Math.sqrt(best.d2) * 111.0;
-    return km <= maxKm ? { ...best.station, km } : null;
-}
-
-function parseAlerts(json) {
-    const list = json?.data?.alarm;
-    if (!Array.isArray(list))
-        return [];
-    return list
-        .filter(a => a && typeof a.title === 'string' && a.title.trim())
-        .map(a => {
-            const level = alertLevel(a.severity);
-            return {
-                id: String(a.id ?? '').trim(),
-                title: a.title.trim(),
-                level,
-                type: String(a.signaltype ?? '').trim(),
-                effective: String(a.effective ?? '').trim(),
-            };
-        })
-        .sort((a, b) => b.level.rank - a.level.rank);
-}
-
-function parseAlertDetail(json) {
-    const d = json?.data;
-    if (!d || typeof d !== 'object')
-        return null;
-    const text = v => (typeof v === 'string' ? v.trim() : '');
-    return {
-        sender: text(d.sender),
-        effective: text(d.effective),
-        description: text(d.description),
-        guide: text(d.guide),
-    };
-}
+import { ALERT_DETAIL_FAILED, ALERT_DETAIL_WIDTH, ALERT_MAX_FAILURES, findNearestStation, getCmaAlertDetailUrl, getCmaAlertsUrl, parseAlertDetail, parseAlerts, parseStationList } from './lib/alerts.js';
+import { AQI_FONT_PX, AQI_MAX_FAILURES, AQI_RING_SIZE, aqiFillRatio, chinaAqiFromHourly, parseAqiIndex } from './lib/aqi.js';
+import { parseAstro, parseMoonPhases, parseTrendPoints } from './lib/astro.js';
+import { TEMP_BAR_HEIGHT, TEMP_BAR_WIDTH, TEMP_RAMP, cairoFontDescription, roundedBarPath } from './lib/drawing.js';
+import { BATTERY_INTERVAL_SEC, CACHE_TTL_SEC, CALENDAR_COLS, DAILY_REQUEST_BUDGET, FORECAST_ROWS, MANUAL_COOLDOWN_SEC, UPDATE_INTERVAL_SEC, compassToChinese, currentRequestCount, formatMeasure, getAirQualityUrl, getForecastUrl, getWeatherUrl, logError, migrateSourceSettings, nextRequestCount, normalizeHost, parseCsvLine, roundTemp, safeIconCode, setDebugLogging, toFiniteOrNull, toPercent } from './lib/util.js';
+import { SunMoonBands } from './ui/sunMoonBands.js';
+import { TrendChart } from './ui/trendChart.js';
+import { appendPressureSample, formatPressureTrend, getOpenMeteoAirQualityUrl, getOpenMeteoUrl, openMeteoAsQweatherCurrent, openMeteoAsQweatherDaily, parsePressureHistory, pressureTrend } from './lib/weather.js';
 
 export default class ClimaCNExtension extends Extension {
+    _isActive() {
+        return !!this._cancellable && !this._cancellable.is_cancelled();
+    }
+
     enable() {
-        this._enabled = true;
+        this._cancellable = new Gio.Cancellable();
 
         this._indicator = null;
         this._timeoutId = 0;
@@ -865,11 +39,7 @@ export default class ClimaCNExtension extends Extension {
         this._sourceForecastId = 0;
         this._sourceAirQualityId = 0;
         this._sourceAstronomyId = 0;
-        this._sunArcRepaintId = 0;
-        this._moonArcRepaintId = 0;
         this._aqiRepaintId = 0;
-        this._trendRepaintId = 0;
-        this._trendMoonRepaintId = 0;
         this._refreshActivateId = 0;
         this._calendarClickedId = 0;
         this._showInCalendarId = 0;
@@ -890,7 +60,6 @@ export default class ClimaCNExtension extends Extension {
         this._calendarGrid = null;
         this._calendarCityLabel = null;
         this._session = new Soup.Session();
-        this._cancellable = new Gio.Cancellable();
 
         this._cityData = null;
         this._isLoadingCities = false;
@@ -913,13 +82,6 @@ export default class ClimaCNExtension extends Extension {
         this._pressureHistory = parsePressureHistory(this._settings.get_string('pressure-history'));
         this._aqi = null;
         this._aqiFailCount = 0;
-        this._nowMinutes = 0;
-        this._sunLegendLabels = [];
-        this._moonLegendLabels = [];
-        this._astro = null;
-        this._moonPosition = null;
-        this._trendPoints = [];
-        this._moonPhases = [];
         this._lastForecast = null;
         this._attributionText = '';
         this._errorShown = false;
@@ -927,14 +89,14 @@ export default class ClimaCNExtension extends Extension {
         this._writingSettings = false;
 
         const onConfigChanged = () => {
-            if (!this._enabled) return;
+            if (!this._isActive()) return;
             if (this._configDebounceId) {
                 GLib.Source.remove(this._configDebounceId);
                 this._configDebounceId = 0;
             }
             this._configDebounceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 800, () => {
                 this._configDebounceId = 0;
-                if (!this._enabled) return GLib.SOURCE_REMOVE;
+                if (!this._isActive()) return GLib.SOURCE_REMOVE;
                 this._startAutoRefresh();
                 this._fetchWeather();
                 return GLib.SOURCE_REMOVE;
@@ -949,7 +111,7 @@ export default class ClimaCNExtension extends Extension {
             onConfigChanged();
         });
         const onLocationChanged = () => {
-            if (!this._enabled || this._writingSettings) return;
+            if (!this._isActive() || this._writingSettings) return;
             this._alertGen++;
             this._updateAlerts([]);
             const lat = this._settings.get_double('latitude');
@@ -962,7 +124,7 @@ export default class ClimaCNExtension extends Extension {
         this._latitudeChangedId = this._settings.connect('changed::latitude', onLocationChanged);
         this._longitudeChangedId = this._settings.connect('changed::longitude', onLocationChanged);
         this._cityNameChangedId = this._settings.connect('changed::city-name', () => {
-            if (!this._enabled || this._writingSettings) return;
+            if (!this._isActive() || this._writingSettings) return;
             const name = this._settings.get_string('city-name');
             if (name === this._currentCityName) return;
             this._currentCityName = name;
@@ -981,7 +143,7 @@ export default class ClimaCNExtension extends Extension {
         this._sourceAstronomyId = this._settings.connect('changed::source-astronomy', onSourceChanged);
 
         this._showInCalendarId = this._settings.connect('changed::show-in-calendar', () => {
-            if (!this._enabled) return;
+            if (!this._isActive()) return;
             if (this._settings.get_boolean('show-in-calendar'))
                 this._buildCalendarSection();
             else
@@ -989,7 +151,7 @@ export default class ClimaCNExtension extends Extension {
         });
 
         this._showAlertsId = this._settings.connect('changed::show-alerts', () => {
-            if (!this._enabled) return;
+            if (!this._isActive()) return;
             this._alertGen++;
             if (this._settings.get_boolean('show-alerts')) {
                 this._alertFailCount = 0;
@@ -1015,38 +177,9 @@ export default class ClimaCNExtension extends Extension {
         this._startAutoRefresh();
     }
 
-    _initPowerMonitor() {
-        Gio.DBusProxy.new_for_bus(
-            Gio.BusType.SYSTEM,
-            Gio.DBusProxyFlags.NONE,
-            null,
-            'org.freedesktop.UPower',
-            '/org/freedesktop/UPower',
-            'org.freedesktop.UPower',
-            null,
-            (source, result) => {
-                if (!this._enabled) return;
-                try {
-                    this._upower = Gio.DBusProxy.new_for_bus_finish(result);
-                } catch (e) {
-                    this._upower = null;
-                    return;
-                }
-                this._onBattery = this._upower.get_cached_property('OnBattery')?.get_boolean() ?? false;
-                this._upowerSignalId = this._upower.connect('g-properties-changed', () => {
-                    if (!this._enabled) return;
-                    const onBattery = this._upower?.get_cached_property('OnBattery')?.get_boolean() ?? false;
-                    if (onBattery === this._onBattery) return;
-                    this._onBattery = onBattery;
-                    this._restartAutoRefresh();
-                });
-                this._restartAutoRefresh();
-            }
-        );
-    }
-
     disable() {
-        this._enabled = false;
+        if (this._cancellable && !this._cancellable.is_cancelled())
+            this._cancellable.cancel();
 
         if (this._timeoutId) {
             GLib.Source.remove(this._timeoutId);
@@ -1061,8 +194,6 @@ export default class ClimaCNExtension extends Extension {
             this._configDebounceId = 0;
         }
 
-        if (this._cancellable && !this._cancellable.is_cancelled())
-            this._cancellable.cancel();
         if (this._session) {
             this._session.abort();
             this._session = null;
@@ -1152,13 +283,6 @@ export default class ClimaCNExtension extends Extension {
         this._aqi = null;
         this._aqiFailCount = 0;
         this._pressureHistory = [];
-        this._nowMinutes = 0;
-        this._sunLegendLabels = [];
-        this._moonLegendLabels = [];
-        this._astro = null;
-        this._moonPosition = null;
-        this._trendPoints = [];
-        this._moonPhases = [];
         this._lastForecast = null;
         this._alertGen = 0;
         this._alertFailCount = 0;
@@ -1179,6 +303,38 @@ export default class ClimaCNExtension extends Extension {
         this._cancellable = null;
     }
 
+        _initPowerMonitor() {
+        Gio.DBusProxy.new_for_bus(
+            Gio.BusType.SYSTEM,
+            Gio.DBusProxyFlags.NONE,
+            null,
+            'org.freedesktop.UPower',
+            '/org/freedesktop/UPower',
+            'org.freedesktop.UPower',
+            null,
+            (source, result) => {
+                if (!this._isActive()) return;
+                try {
+                    this._upower = Gio.DBusProxy.new_for_bus_finish(result);
+                } catch (e) {
+                    this._upower = null;
+                    return;
+                }
+                this._onBattery = this._upower.get_cached_property('OnBattery')?.get_boolean() ?? false;
+                this._upowerSignalId = this._upower.connect('g-properties-changed', () => {
+                    if (!this._isActive()) return;
+                    const onBattery = this._upower?.get_cached_property('OnBattery')?.get_boolean() ?? false;
+                    if (onBattery === this._onBattery) return;
+                    this._onBattery = onBattery;
+                    this._restartAutoRefresh();
+                });
+                this._restartAutoRefresh();
+            }
+        );
+    }
+
+    
+
     _destroyUI() {
         if (this._searchEntry) {
             const clutterText = this._searchEntry.clutter_text;
@@ -1191,25 +347,9 @@ export default class ClimaCNExtension extends Extension {
                 this._searchTextChangedId = 0;
             }
         }
-        if (this._sunArcRepaintId) {
-            this._sunArcArea?.disconnect(this._sunArcRepaintId);
-            this._sunArcRepaintId = 0;
-        }
-        if (this._moonArcRepaintId) {
-            this._moonArcArea?.disconnect(this._moonArcRepaintId);
-            this._moonArcRepaintId = 0;
-        }
-        if (this._trendMoonRepaintId) {
-            this._trendMoonArea?.disconnect(this._trendMoonRepaintId);
-            this._trendMoonRepaintId = 0;
-        }
         if (this._aqiRepaintId) {
             this._aqiArea?.disconnect(this._aqiRepaintId);
             this._aqiRepaintId = 0;
-        }
-        if (this._trendRepaintId) {
-            this._trendArea?.disconnect(this._trendRepaintId);
-            this._trendRepaintId = 0;
         }
         if (this._refreshActivateId) {
             this._refreshItem?.disconnect(this._refreshActivateId);
@@ -1220,17 +360,8 @@ export default class ClimaCNExtension extends Extension {
 
         this._destroyAlerts();
 
-        this._sunArcArea?.destroy();
-        this._sunArcArea = null;
-        this._sunLegendLabels = [];
-        this._sunArcItem?.destroy();
-        this._sunArcItem = null;
-
-        this._moonArcArea?.destroy();
-        this._moonArcArea = null;
-        this._moonLegendLabels = [];
-        this._moonArcItem?.destroy();
-        this._moonArcItem = null;
+        this._bands?.destroy();
+        this._bands = null;
 
         this._aqiArea?.destroy();
         this._aqiArea = null;
@@ -1263,12 +394,8 @@ export default class ClimaCNExtension extends Extension {
         this._forecastRowsBox = null;
         this._forecastContainer?.destroy();
         this._forecastContainer = null;
-        this._trendArea?.destroy();
-        this._trendArea = null;
-        this._trendMoonArea?.destroy();
-        this._trendMoonArea = null;
-        this._trendItem?.destroy();
-        this._trendItem = null;
+        this._trend?.destroy();
+        this._trend = null;
 
         this._searchEntry?.destroy();
         this._searchEntry = null;
@@ -1320,6 +447,8 @@ export default class ClimaCNExtension extends Extension {
         box.add_child(this._tempLabel);
         this._indicator.add_child(box);
         this._indicator.menu.box.add_style_class_name('climacn-menu');
+        this._bands = new SunMoonBands(this);
+        this._trend = new TrendChart(this);
         this._buildMenu();
         Main.panel.addToStatusArea('climacn', this._indicator);
     }
@@ -1478,12 +607,7 @@ export default class ClimaCNExtension extends Extension {
 
         const card = this._calendarCard;
         this._calendarCard = null;
-
-        try {
-            card?.destroy();
-        } catch (e) {
-            logError(`Failed to destroy calendar card: ${e}`);
-        }
+        card?.destroy();
     }
 
     _buildMenu() {
@@ -1497,91 +621,16 @@ export default class ClimaCNExtension extends Extension {
         this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         this._buildDetails();
-        this._buildSunBand();
-        this._buildMoonBand();
+        this._bands.build();
         this._buildForecast();
         this._buildFooter();
     }
 
-    _buildLegendItem(spec, legend) {
-        const item = new St.BoxLayout({
-            style_class: 'climacn-band-legend-item',
-            vertical: true,
-            x_expand: true
-        });
-        const head = new St.BoxLayout({ style_class: 'climacn-band-legend-head' });
-        head.add_child(new St.Widget({
-            style_class: `climacn-band-dot climacn-band-dot-${spec.key}`
-        }));
-        head.add_child(new St.Label({
-            text: _(spec.label),
-            style_class: 'climacn-band-legend-label'
-        }));
-        item.add_child(head);
-        const time = new St.Label({
-            text: '--:--',
-            style_class: 'climacn-band-legend-time'
-        });
-        item.add_child(time);
-        legend.add_child(item);
-        return time;
-    }
+    
 
-    _buildSunBand() {
-        const outer = new St.BoxLayout({
-            style_class: 'climacn-sun-arc',
-            vertical: true,
-            x_expand: true
-        });
+    
 
-        this._sunArcArea = new St.DrawingArea({
-            style_class: 'climacn-sun-arc-canvas',
-            x_expand: true,
-            height: BAND_HEIGHT
-        });
-        this._sunArcRepaintId = this._sunArcArea.connect('repaint', () => this._drawSunBand());
-        outer.add_child(this._sunArcArea);
-
-        const legend = new St.BoxLayout({
-            style_class: 'climacn-band-legend',
-            x_expand: true
-        });
-        this._sunLegendLabels = SUN_LEGEND.map(ev => this._buildLegendItem(ev, legend));
-        outer.add_child(legend);
-
-        this._sunArcItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
-        this._sunArcItem.add_child(outer);
-        this._sunArcItem.visible = false;
-        this._indicator.menu.addMenuItem(this._sunArcItem);
-    }
-
-    _buildMoonBand() {
-        const outer = new St.BoxLayout({
-            style_class: 'climacn-moon-arc',
-            vertical: true,
-            x_expand: true
-        });
-
-        this._moonArcArea = new St.DrawingArea({
-            style_class: 'climacn-sun-arc-canvas',
-            x_expand: true,
-            height: BAND_HEIGHT
-        });
-        this._moonArcRepaintId = this._moonArcArea.connect('repaint', () => this._drawMoonBand());
-        outer.add_child(this._moonArcArea);
-
-        const legend = new St.BoxLayout({
-            style_class: 'climacn-band-legend',
-            x_expand: true
-        });
-        this._moonLegendLabels = MOON_LEGEND.map(ev => this._buildLegendItem(ev, legend));
-        outer.add_child(legend);
-
-        this._moonArcItem = new PopupMenu.PopupBaseMenuItem({ activate: false });
-        this._moonArcItem.add_child(outer);
-        this._moonArcItem.visible = false;
-        this._indicator.menu.addMenuItem(this._moonArcItem);
-    }
+    
 
     _buildAlerts() {
         this._alertItem = new PopupMenu.PopupSubMenuMenuItem('', false);
@@ -1644,7 +693,7 @@ export default class ClimaCNExtension extends Extension {
             (session, result) => {
                 try {
                     const bytes = session.send_and_read_finish(result);
-                    if (!this._enabled || this._cancellable?.is_cancelled())
+                    if (!this._isActive())
                         return;
                     if (gen !== this._alertGen)
                         return;
@@ -1659,7 +708,7 @@ export default class ClimaCNExtension extends Extension {
                     if (this._alertItem?.menu.isOpen)
                         this._renderAlertDetails();
                 } catch (e) {
-                    if (!this._enabled)
+                    if (!this._isActive())
                         return;
                     logError(`预警详情解析失败: ${e}`);
                     this._alertDetails.set(alertId, ALERT_DETAIL_FAILED);
@@ -1737,7 +786,7 @@ export default class ClimaCNExtension extends Extension {
             const waiters = this._stationWaiters;
             this._stationWaiters = [];
             this._loadingStations = false;
-            if (!this._enabled)
+            if (!this._isActive())
                 return;
             try {
                 const [ok, contents] = f.load_contents_finish(result);
@@ -1749,20 +798,20 @@ export default class ClimaCNExtension extends Extension {
                 this._cmaStations = [];
             }
             for (const fn of waiters) {
-                if (this._enabled)
+                if (this._isActive())
                     fn();
             }
         });
     }
 
     _refreshAlerts() {
-        if (!this._enabled || !this._settings?.get_boolean('show-alerts'))
+        if (!this._isActive() || !this._settings?.get_boolean('show-alerts'))
             return;
         if (this._alertFailCount >= ALERT_MAX_FAILURES)
             return;
 
         this._loadStationData(() => {
-            if (!this._enabled || !this._settings?.get_boolean('show-alerts'))
+            if (!this._isActive() || !this._settings?.get_boolean('show-alerts'))
                 return;
             if (this._alertFailCount >= ALERT_MAX_FAILURES)
                 return;
@@ -1791,7 +840,7 @@ export default class ClimaCNExtension extends Extension {
             (session, result) => {
                 try {
                     const bytes = session.send_and_read_finish(result);
-                    if (!this._enabled || this._cancellable?.is_cancelled())
+                    if (!this._isActive())
                         return;
                     if (gen !== this._alertGen)
                         return;
@@ -1805,7 +854,7 @@ export default class ClimaCNExtension extends Extension {
                     this._updateAlerts(parseAlerts(
                         JSON.parse(new TextDecoder().decode(bytes.get_data()))));
                 } catch (e) {
-                    if (!this._enabled)
+                    if (!this._isActive())
                         return;
                     this._alertFailCount++;
                     logError(`预警解析失败: ${e}`);
@@ -2027,89 +1076,16 @@ export default class ClimaCNExtension extends Extension {
         });
         this._forecastContainer.add_child(this._forecastRowsBox);
 
-        this._buildTrendSubmenu();
+        this._trend.build();
 
         const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
         item.add_child(this._forecastContainer);
         this._indicator.menu.addMenuItem(item);
     }
 
-    _buildTrendSubmenu() {
-        this._trendItem = new PopupMenu.PopupSubMenuMenuItem(_('10 天趋势'), false);
-        this._trendItem.visible = false;
+    
 
-        this._trendArea = new St.DrawingArea({
-            style_class: 'climacn-trend-chart',
-            width: TREND_CHART_WIDTH,
-            height: TREND_CHART_HEIGHT
-        });
-        this._trendRepaintId = this._trendArea.connect('repaint', () => this._drawTrendChart());
-
-        const box = new St.BoxLayout({
-            style_class: 'climacn-trend-box',
-            vertical: true
-        });
-        box.add_child(this._trendArea);
-
-        this._trendMoonArea = new St.DrawingArea({
-            style_class: 'climacn-trend-moons',
-            width: TREND_CHART_WIDTH,
-            height: MOON_STRIP_HEIGHT
-        });
-        this._trendMoonRepaintId =
-            this._trendMoonArea.connect('repaint', () => this._drawTrendMoons());
-        box.add_child(this._trendMoonArea);
-
-        const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
-        item.add_child(box);
-        this._trendItem.menu.addMenuItem(item);
-        this._indicator.menu.addMenuItem(this._trendItem);
-    }
-
-    _drawTrendMoons() {
-        const area = this._trendMoonArea;
-        const phases = this._moonPhases;
-        if (!area || !Array.isArray(phases) || phases.length === 0)
-            return;
-        const [width, height] = area.get_surface_size();
-        if (width <= 0 || height <= 0)
-            return;
-        const cr = area.get_context();
-        try {
-            const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
-            const fg = this._themeColor(area);
-            const r = Math.max(3, 6 * scaleFactor);
-            const cy = r + 2 * scaleFactor;
-
-            const padX = 10 * scaleFactor;
-            const step = phases.length > 1
-                ? (width - 2 * padX) / (phases.length - 1)
-                : 0;
-            const cxAt = i => phases.length > 1 ? padX + step * i : width / 2;
-
-            const layout = PangoCairo.create_layout(cr);
-            let themeFont = null;
-            try {
-                themeFont = area.get_theme_node().get_font();
-            } catch (_e) {
-                themeFont = null;
-            }
-            layout.set_font_description(cairoFontDescription(themeFont, 7, scaleFactor));
-
-            for (let i = 0; i < phases.length; i++) {
-                const phase = phases[i];
-                if (!phase)
-                    continue;
-                const cx = cxAt(i);
-                this._drawMoonDisc(cr, cx, cy, r, phase, fg, 0.95);
-                cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.6);
-                drawCenteredText(cr, layout, `${Math.round(phase.lit * 100)}%`,
-                                 cx, height - 5 * scaleFactor);
-            }
-        } finally {
-            cr.$dispose();
-        }
-    }
+    
 
     _buildFooter() {
         this._noticeLabel = new St.Label({
@@ -2186,7 +1162,7 @@ export default class ClimaCNExtension extends Extension {
         this._isLoadingCities = true;
         const csvFile = Gio.File.new_for_path(`${this.path}/data/China-City-List-latest.csv`);
         csvFile.load_contents_async(null, (file, result) => {
-            if (!this._enabled) return;
+            if (!this._isActive()) return;
             try {
                 const [success, contents] = file.load_contents_finish(result);
                 if (!success) throw new Error('load failed');
@@ -2362,7 +1338,7 @@ export default class ClimaCNExtension extends Extension {
             GLib.Source.remove(this._timeoutId);
             this._timeoutId = 0;
         }
-        if (!this._enabled)
+        if (!this._isActive())
             return;
         this._startAutoRefresh();
     }
@@ -2379,7 +1355,7 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _onManualRefresh() {
-        if (!this._enabled)
+        if (!this._isActive())
             return;
         if (this._secondsSinceFetch() < MANUAL_COOLDOWN_SEC)
             return;
@@ -2503,7 +1479,7 @@ export default class ClimaCNExtension extends Extension {
             (session, result) => {
                 try {
                     const bytes = session.send_and_read_finish(result);
-                    if (!this._enabled || this._cancellable?.is_cancelled())
+                    if (!this._isActive())
                         return;
                     if (seq !== this._requestSeq)
                         return;
@@ -2513,7 +1489,7 @@ export default class ClimaCNExtension extends Extension {
                     }
                     return onText(JSON.parse(new TextDecoder().decode(bytes.get_data())));
                 } catch (e) {
-                    if (!this._enabled)
+                    if (!this._isActive())
                         return;
                     logError(`${label} error: ${e}`);
                     return onText(null);
@@ -2563,7 +1539,7 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _fetchWeather() {
-        if (!this._enabled)
+        if (!this._isActive())
             return;
 
         this._refreshAlerts();
@@ -2598,7 +1574,7 @@ export default class ClimaCNExtension extends Extension {
             if (settled || !needed.every(k => k in pending))
                 return;
             settled = true;
-            if (!this._enabled || seq !== this._requestSeq)
+            if (!this._isActive() || seq !== this._requestSeq)
                 return;
             this._applyPlan(plan, pending);
         };
@@ -2695,7 +1671,7 @@ export default class ClimaCNExtension extends Extension {
             (session, result) => {
                 try {
                     const bytes = session.send_and_read_finish(result);
-                    if (!this._enabled) return;
+                    if (!this._isActive()) return;
                     if (seq !== this._requestSeq) return;
                     if (this._cancellable?.is_cancelled()) {
                         callback(null);
@@ -2709,7 +1685,7 @@ export default class ClimaCNExtension extends Extension {
                     const json = JSON.parse(new TextDecoder().decode(bytes.get_data()));
                     callback(Array.isArray(json.days) ? json.days : null);
                 } catch (e) {
-                    if (!this._enabled) return;
+                    if (!this._isActive()) return;
                     logError(`Forecast parse error: ${e}`);
                     callback(null);
                 }
@@ -2738,7 +1714,7 @@ export default class ClimaCNExtension extends Extension {
             (session, result) => {
                 try {
                     const bytes = session.send_and_read_finish(result);
-                    if (!this._enabled || seq !== this._requestSeq) return;
+                    if (!this._isActive() || seq !== this._requestSeq) return;
                     if (this._cancellable?.is_cancelled()) {
                         callback(null);
                         return;
@@ -2753,7 +1729,7 @@ export default class ClimaCNExtension extends Extension {
                     this._aqiFailCount = 0;
                     callback(parseAqiIndex(json));
                 } catch (e) {
-                    if (!this._enabled) return;
+                    if (!this._isActive()) return;
                     logError(`Air quality parse error: ${e}`);
                     callback(null);
                 }
@@ -2844,217 +1820,19 @@ export default class ClimaCNExtension extends Extension {
         }
     }
 
-    _themeColor(area) {
-        const [hasFg, fg] = area.get_theme_node().lookup_color('color', false);
-        return hasFg ? [fg.red / 255, fg.green / 255, fg.blue / 255] : [0.5, 0.5, 0.5];
-    }
+    
 
-    _drawNowMark(cr, width, cy, height, scaleFactor) {
-        const now = bandRatio(this._nowMinutes);
-        if (now === null)
-            return;
-        const w = Math.max(2, BAND_NOW_W * scaleFactor);
-        const h = Math.min(height, BAND_NOW_H * scaleFactor);
-        const x = Math.min(Math.max(now * width, w / 2), width - w / 2);
-        cr.setSourceRGBA(1, 1, 1, 0.95);
-        this._roundedRectPath(cr, x - w / 2, cy - h / 2, w, h, w / 2);
-        cr.fill();
-    }
+    
 
-    _drawSunBand() {
-        const area = this._sunArcArea;
-        const astro = this._astro;
-        if (!area || !astro)
-            return;
-        const [width, height] = area.get_surface_size();
-        if (width <= 0 || height <= 0)
-            return;
-        const cr = area.get_context();
-        try {
-            const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
-            const bandH = Math.min(height, BAND_HEIGHT * scaleFactor);
-            const y = (height - bandH) / 2;
-            const cy = height / 2;
+    
 
-            const grad = new Cairo.LinearGradient(0, 0, width, 0);
-            for (let i = 0; i <= BAND_STOPS; i++) {
-                const t = i / BAND_STOPS;
-                const c = bandSkyColorAt(t, astro);
-                grad.addColorStopRGBA(t, c[0], c[1], c[2], 1);
-            }
-            cr.setSource(grad);
-            this._roundedRectPath(cr, 0, y, width, bandH,
-                                  BAND_RADIUS * scaleFactor);
-            cr.fill();
+    
 
-            cr.setSourceRGBA(1, 1, 1, 0.45);
-            cr.setLineWidth(Math.max(1, 1.5 * scaleFactor));
-            cr.moveTo(0, cy);
-            cr.lineTo(width, cy);
-            cr.stroke();
+    
 
-            const knobR = BAND_KNOB_R * scaleFactor;
-            const ringW = Math.max(1.2, 1.6 * scaleFactor);
-            for (const ev of SUN_LEGEND) {
-                const r = bandRatio(astro[ev.field]);
-                if (r === null)
-                    continue;
-                const color = BAND_DOT_COLORS[ev.key];
-                const x = r * width;
-                cr.setSourceRGBA(0, 0, 0, 0.45);
-                cr.setLineWidth(Math.max(1, 1.2 * scaleFactor));
-                cr.arc(x, cy, knobR + ringW, 0, 2 * Math.PI);
-                cr.stroke();
-                cr.setSourceRGBA(color[0], color[1], color[2], 1);
-                cr.arc(x, cy, knobR, 0, 2 * Math.PI);
-                cr.fill();
-                cr.setSourceRGBA(1, 1, 1, 0.9);
-                cr.setLineWidth(ringW);
-                cr.arc(x, cy, knobR, 0, 2 * Math.PI);
-                cr.stroke();
-            }
+    
 
-            this._drawNowMark(cr, width, cy, height, scaleFactor);
-        } finally {
-            cr.$dispose();
-        }
-    }
-
-    _drawMoonDisc(cr, cx, cy, r, phase, fg, alpha = 1) {
-        if (!(r > 0))
-            return;
-        const lit = Math.min(Math.max(phase?.lit ?? 0, 0), 1);
-
-        cr.setSourceRGBA(fg[0], fg[1], fg[2], MOON_DARK_ALPHA * alpha);
-        cr.arc(cx, cy, r, 0, 2 * Math.PI);
-        cr.fill();
-
-        if (lit > 0.001) {
-            cr.save();
-            if (!(phase?.waxing ?? true)) {
-                cr.translate(cx, cy);
-                cr.scale(-1, 1);
-                cr.translate(-cx, -cy);
-            }
-            const a = Math.max(Math.abs(1 - 2 * lit), 0.001);
-            cr.newSubPath();
-            cr.arc(cx, cy, r, -Math.PI / 2, Math.PI / 2);
-            cr.save();
-            cr.translate(cx, cy);
-            cr.scale(a, 1);
-            if (lit > 0.5)
-                cr.arc(0, 0, r, Math.PI / 2, 3 * Math.PI / 2);
-            else
-                cr.arcNegative(0, 0, r, Math.PI / 2, -Math.PI / 2);
-            cr.restore();
-            cr.closePath();
-            cr.setSourceRGBA(fg[0], fg[1], fg[2], MOON_LIT_ALPHA * alpha);
-            cr.fill();
-            cr.restore();
-        }
-
-        cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.45 * alpha);
-        cr.setLineWidth(Math.max(0.8, r * 0.14));
-        cr.arc(cx, cy, r, 0, 2 * Math.PI);
-        cr.stroke();
-    }
-
-    _drawMoonBand() {
-        const area = this._moonArcArea;
-        const moon = this._astro?.moon;
-        if (!area || !moon)
-            return;
-        const [width, height] = area.get_surface_size();
-        if (width <= 0 || height <= 0)
-            return;
-        const cr = area.get_context();
-        try {
-            const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
-            const bandH = Math.min(height, BAND_HEIGHT * scaleFactor);
-            const y = (height - bandH) / 2;
-            const cy = height / 2;
-            const fg = this._themeColor(area);
-            const radius = BAND_RADIUS * scaleFactor;
-
-            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.16);
-            this._roundedRectPath(cr, 0, y, width, bandH, radius);
-            cr.fill();
-
-            for (const [start, end] of moonUpSpans(moon)) {
-                const x0 = (start / DAY_MINUTES) * width;
-                const x1 = (end / DAY_MINUTES) * width;
-                cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.42);
-                this._roundedRectPath(cr, x0, y, x1 - x0, bandH, radius);
-                cr.fill();
-            }
-
-            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.45);
-            cr.setLineWidth(Math.max(1, 1.5 * scaleFactor));
-            cr.moveTo(0, cy);
-            cr.lineTo(width, cy);
-            cr.stroke();
-
-            cr.setSourceRGBA(fg[0], fg[1], fg[2], 0.30);
-            cr.setLineWidth(Math.max(1, 1 * scaleFactor));
-            this._roundedRectPath(cr, 0, y, width, bandH, radius);
-            cr.stroke();
-
-            const knobR = BAND_KNOB_R * scaleFactor;
-            const ringW = Math.max(1.2, 1.6 * scaleFactor);
-            const knobColor = BAND_DOT_COLORS.moon;
-            for (const m of [moon.moonrise, moon.moonset % DAY_MINUTES]) {
-                const r = bandRatio(m);
-                if (r === null)
-                    continue;
-                const x = r * width;
-                cr.setSourceRGBA(0, 0, 0, 0.45);
-                cr.setLineWidth(Math.max(1, 1.2 * scaleFactor));
-                cr.arc(x, cy, knobR + ringW, 0, 2 * Math.PI);
-                cr.stroke();
-                cr.setSourceRGBA(knobColor[0], knobColor[1], knobColor[2], 1);
-                cr.arc(x, cy, knobR, 0, 2 * Math.PI);
-                cr.fill();
-                cr.setSourceRGBA(1, 1, 1, 0.9);
-                cr.setLineWidth(ringW);
-                cr.arc(x, cy, knobR, 0, 2 * Math.PI);
-                cr.stroke();
-            }
-
-            const now = bandRatio(this._nowMinutes);
-            if (now === null)
-                return;
-            const discR = MOON_DISC_RADIUS * scaleFactor;
-            const x = Math.min(Math.max(now * width, discR), width - discR);
-            this._drawMoonDisc(cr, x, cy, discR, moon.phase, fg,
-                               this._moonPosition?.isUp ? 1 : 0.4);
-        } finally {
-            cr.$dispose();
-        }
-    }
-
-    _roundedRectPath(cr, x, y, w, h, radius) {
-        const r = Math.max(0, Math.min(radius, h / 2, w / 2));
-        cr.newSubPath();
-        if (r <= 0) {
-            cr.rectangle(x, y, w, h);
-            return;
-        }
-        cr.arc(x + w - r, y + r, r, -Math.PI / 2, 0);
-        cr.arc(x + w - r, y + h - r, r, 0, Math.PI / 2);
-        cr.arc(x + r, y + h - r, r, Math.PI / 2, Math.PI);
-        cr.arc(x + r, y + r, r, Math.PI, Math.PI * 1.5);
-        cr.closePath();
-    }
-
-    _roundedBarPath(cr, x, y, w, h) {
-        const r = Math.min(h / 2, w / 2);
-        if (r <= 0)
-            return;
-        cr.newSubPath();
-        cr.arc(x + r, y + r, r, Math.PI / 2, Math.PI * 1.5);
-        cr.arc(x + w - r, y + r, r, -Math.PI / 2, Math.PI / 2);
-        cr.closePath();
-    }
+    
 
     _drawTempBar(area) {
         const range = area?._climacnRange;
@@ -3076,7 +1854,7 @@ export default class ClimaCNExtension extends Extension {
                 ? [fg.red / 255, fg.green / 255, fg.blue / 255]
                 : [0.5, 0.5, 0.5];
             cr.setSourceRGBA(track[0], track[1], track[2], 0.18);
-            this._roundedBarPath(cr, 0, y, width, barH);
+            roundedBarPath(cr, 0, y, width, barH);
             cr.fill();
 
             const x0 = width * Math.min(Math.max(min - lo, 0), span) / span;
@@ -3087,7 +1865,7 @@ export default class ClimaCNExtension extends Extension {
             for (const [off, r, g, b] of TEMP_RAMP)
                 grad.addColorStopRGBA(off, r, g, b, 0.95);
             cr.setSource(grad);
-            this._roundedBarPath(cr, x0, y, Math.min(segW, width - x0), barH);
+            roundedBarPath(cr, x0, y, Math.min(segW, width - x0), barH);
             cr.fill();
         } finally {
             cr.$dispose();
@@ -3106,130 +1884,7 @@ export default class ClimaCNExtension extends Extension {
         return area;
     }
 
-    _drawTrendChart() {
-        const area = this._trendArea;
-        if (!area)
-            return;
-        const points = this._trendPoints;
-        if (!Array.isArray(points) || points.length < 2)
-            return;
-        const [width, height] = area.get_surface_size();
-        const cr = area.get_context();
-        try {
-            const { scaleFactor } = St.ThemeContext.get_for_stage(global.stage);
-            const themeNode = area.get_theme_node();
-            const dotR = Math.max(1.5, 1.8 * scaleFactor);
-            const labelH = TREND_LABEL_PX * scaleFactor + 2;
-            const padX = 10 * scaleFactor;
-            const plotTop = dotR + labelH + 2;
-            const plotBottom = height - dotR - labelH - 2;
-            const plotW = width - 2 * padX;
-            const plotH = plotBottom - plotTop;
-            if (plotW <= 0 || plotH <= 0)
-                return;
-
-            const days = points.filter(Boolean);
-            if (days.length < 2)
-                return;
-            const lo = Math.min(...days.map(p => p.min));
-            const hi = Math.max(...days.map(p => p.max));
-            const span = hi - lo || 1;
-
-            const xAt = i => padX + (plotW * i) / (points.length - 1);
-            const yAt = v => plotTop + plotH * (1 - (v - lo) / span);
-
-            const segments = [];
-            let seg = null;
-            for (let i = 0; i < points.length; i++) {
-                if (points[i]) {
-                    if (!seg)
-                        segments.push(seg = []);
-                    seg.push(i);
-                } else {
-                    seg = null;
-                }
-            }
-
-            const HIGH = [...COLOR_HIGH, 0.95];
-            const LOW = [...COLOR_LOW, 0.95];
-
-            cr.newSubPath();
-            for (const s of segments) {
-                cr.moveTo(xAt(s[0]), yAt(points[s[0]].max));
-                for (const i of s)
-                    cr.lineTo(xAt(i), yAt(points[i].max));
-                for (let k = s.length - 1; k >= 0; k--)
-                    cr.lineTo(xAt(s[k]), yAt(points[s[k]].min));
-                cr.closePath();
-            }
-            const bandGrad = new Cairo.LinearGradient(0, plotTop, 0, plotBottom);
-            for (const [off, r, g, b] of TEMP_RAMP)
-                bandGrad.addColorStopRGBA(1 - off, r, g, b, 0.30);
-            cr.setSource(bandGrad);
-            cr.fill();
-
-            cr.newSubPath();
-            for (const s of segments) {
-                cr.moveTo(xAt(s[0]), yAt(points[s[0]].min));
-                for (const i of s)
-                    cr.lineTo(xAt(i), yAt(points[i].min));
-                cr.lineTo(xAt(s[s.length - 1]), plotBottom);
-                cr.lineTo(xAt(s[0]), plotBottom);
-                cr.closePath();
-            }
-            const groundGrad = new Cairo.LinearGradient(0, plotTop, 0, plotBottom);
-            groundGrad.addColorStopRGBA(0, COLOR_LOW[0], COLOR_LOW[1], COLOR_LOW[2], 0.18);
-            groundGrad.addColorStopRGBA(1, COLOR_LOW[0], COLOR_LOW[1], COLOR_LOW[2], 0.0);
-            cr.setSource(groundGrad);
-            cr.fill();
-
-            const polyline = (key, rgba) => {
-                cr.setSourceRGBA(rgba[0], rgba[1], rgba[2], rgba[3]);
-                cr.setLineWidth(Math.max(1.2, 1.6 * scaleFactor));
-                cr.setLineJoin(Cairo.LineJoin.ROUND);
-                cr.newSubPath();
-                for (const s of segments) {
-                    cr.moveTo(xAt(s[0]), yAt(points[s[0]][key]));
-                    for (const i of s)
-                        cr.lineTo(xAt(i), yAt(points[i][key]));
-                }
-                cr.stroke();
-            };
-
-            polyline('max', HIGH);
-            polyline('min', LOW);
-
-            const layout = PangoCairo.create_layout(cr);
-            let themeFont = null;
-            try {
-                themeFont = themeNode.get_font();
-            } catch (_e) {
-                themeFont = null;
-            }
-            layout.set_font_description(cairoFontDescription(themeFont, TREND_LABEL_PX, scaleFactor));
-
-            for (const s of segments) {
-                for (const i of s) {
-                    const p = points[i];
-                    cr.setSourceRGBA(HIGH[0], HIGH[1], HIGH[2], 1);
-                    cr.arc(xAt(i), yAt(p.max), dotR, 0, 2 * Math.PI);
-                    cr.fill();
-                    cr.setSourceRGBA(LOW[0], LOW[1], LOW[2], 1);
-                    cr.arc(xAt(i), yAt(p.min), dotR, 0, 2 * Math.PI);
-                    cr.fill();
-
-                    cr.setSourceRGBA(HIGH[0], HIGH[1], HIGH[2], 0.95);
-                    drawCenteredText(cr, layout, `${Math.round(p.max)}°`,
-                                     xAt(i), yAt(p.max) - dotR - labelH / 2);
-                    cr.setSourceRGBA(LOW[0], LOW[1], LOW[2], 0.95);
-                    drawCenteredText(cr, layout, `${Math.round(p.min)}°`,
-                                     xAt(i), yAt(p.min) + dotR + labelH / 2);
-                }
-            }
-        } finally {
-            cr.$dispose();
-        }
-    }
+    
 
     _updateUI(now, forecast, aqi) {
         const iconCode = safeIconCode(now.condition?.code);
@@ -3289,46 +1944,9 @@ export default class ClimaCNExtension extends Extension {
             this._forecastRowsBox.remove_all_children();
         }
 
-        this._astro = parseAstro(forecast);
-        const nowMinutes = (() => {
-            const n = GLib.DateTime.new_now_local();
-            return n.get_hour() * 60 + n.get_minute();
-        })();
-        this._nowMinutes = nowMinutes;
-        this._moonPosition = this._astro?.moon
-            ? moonArcPosition(nowMinutes, this._astro.moon) : null;
+        this._bands.setData(parseAstro(forecast));
 
-        if (this._sunArcItem) {
-            this._sunArcItem.visible = this._astro !== null;
-            if (this._astro) {
-                SUN_LEGEND.forEach((ev, i) => {
-                    this._sunLegendLabels[i].text = formatClock(this._astro[ev.field]);
-                });
-                this._sunArcArea.queue_repaint();
-            }
-        }
-
-        const moon = this._astro?.moon ?? null;
-        if (this._moonArcItem) {
-            this._moonArcItem.visible = moon !== null;
-            if (moon) {
-                this._moonLegendLabels[0].text = formatClock(moon.moonrise);
-                this._moonLegendLabels[1].text = formatClock(moon.moonset);
-                this._moonLegendLabels[2].text = moon.phase?.name || '--';
-                this._moonArcArea.queue_repaint();
-            }
-        }
-
-        this._trendPoints = parseTrendPoints(forecast);
-        this._moonPhases = parseMoonPhases(forecast);
-        const showTrend = this._trendPoints.filter(Boolean).length >= 2;
-        if (this._trendItem) {
-            this._trendItem.visible = showTrend;
-            if (showTrend) {
-                this._trendArea.queue_repaint();
-                this._trendMoonArea.queue_repaint();
-            }
-        }
+        this._trend.setData(parseTrendPoints(forecast), parseMoonPhases(forecast));
 
         if (forecast && Array.isArray(forecast) && forecast.length > 0) {
             const dayNames = ['今天', '明天', '后天'];
@@ -3447,17 +2065,8 @@ export default class ClimaCNExtension extends Extension {
         if (this._aqiGroup)
             this._aqiGroup.visible = false;
 
-        this._nowMinutes = 0;
-        this._astro = null;
-        this._moonPosition = null;
-        if (this._sunArcItem)
-            this._sunArcItem.visible = false;
-        if (this._moonArcItem)
-            this._moonArcItem.visible = false;
-        this._trendPoints = [];
-        this._moonPhases = [];
-        if (this._trendItem)
-            this._trendItem.visible = false;
+        this._bands.clear();
+        this._trend.clear();
 
         if (this._forecastRowsBox) {
             this._forecastRowsBox.remove_all_children();
