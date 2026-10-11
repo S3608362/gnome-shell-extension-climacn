@@ -887,6 +887,13 @@ export default class ClimaCNExtension extends Extension {
         migrateSourceSettings(this._settings);
         this._apiKey = this._settings.get_string('api-key') || '';
         this._host = normalizeHost(this._settings.get_string('api-base-url'));
+        this._useJwt = this._settings.get_boolean('use-jwt');
+        this._jwtKid = this._settings.get_string('jwt-kid') || '';
+        this._jwtIss = this._settings.get_string('jwt-iss') || '';
+        this._jwtSub = this._settings.get_string('jwt-sub') || '';
+        this._jwtKeyPath = this._settings.get_string('jwt-key-path') || '';
+        this._jwtToken = null;
+        this._jwtExp = 0;
 
         this._latitude = this._settings.get_double('latitude');
         this._longitude = this._settings.get_double('longitude');
@@ -928,6 +935,18 @@ export default class ClimaCNExtension extends Extension {
             this._host = normalizeHost(this._settings.get_string('api-base-url'));
             onConfigChanged();
         });
+        const onJwtChanged = () => {
+            this._useJwt = this._settings.get_boolean('use-jwt');
+            this._jwtKid = this._settings.get_string('jwt-kid') || '';
+            this._jwtIss = this._settings.get_string('jwt-iss') || '';
+            this._jwtSub = this._settings.get_string('jwt-sub') || '';
+            this._jwtKeyPath = this._settings.get_string('jwt-key-path') || '';
+            this._jwtToken = null;
+            this._jwtExp = 0;
+            onConfigChanged();
+        };
+        this._jwtChangedIds = ['use-jwt', 'jwt-kid', 'jwt-iss', 'jwt-sub', 'jwt-key-path']
+            .map(key => this._settings.connect('changed::' + key, onJwtChanged));
         const onLocationChanged = () => {
             if (!this._enabled || this._writingSettings) return;
             this._alertGen++;
@@ -1087,6 +1106,11 @@ export default class ClimaCNExtension extends Extension {
             if (this._hostChangedId) {
                 this._settings.disconnect(this._hostChangedId);
                 this._hostChangedId = 0;
+            }
+            if (this._jwtChangedIds) {
+                for (const id of this._jwtChangedIds)
+                    this._settings.disconnect(id);
+                this._jwtChangedIds = [];
             }
             if (this._latitudeChangedId) {
                 this._settings.disconnect(this._latitudeChangedId);
@@ -2431,7 +2455,71 @@ export default class ClimaCNExtension extends Extension {
     }
 
     _qweatherConfigured() {
-        return !!(this._apiKey && this._apiKey.trim() && this._host);
+        if (!this._host)
+            return false;
+        if (this._useJwt)
+            return !!(this._jwtKid && this._jwtIss && this._jwtSub && this._jwtKeyPath);
+        return !!(this._apiKey && this._apiKey.trim());
+    }
+
+    _appendQweatherAuth(message) {
+        if (this._useJwt) {
+            const jwt = this._getJwt();
+            if (jwt) {
+                message.request_headers.append('Authorization', 'Bearer ' + jwt);
+                return;
+            }
+            logError('ClimaCN: JWT 凭据不完整或签名失败，尝试回退到 API Key');
+        }
+        if (this._apiKey)
+            message.request_headers.append('X-Qw-Api-Key', this._apiKey);
+    }
+
+    _getJwt() {
+        const now = Math.floor(Date.now() / 1000);
+        if (this._jwtToken && now < this._jwtExp - 120)
+            return this._jwtToken;
+        if (!this._jwtKid || !this._jwtIss || !this._jwtSub || !this._jwtKeyPath)
+            return null;
+        if (!GLib.file_test(this._jwtKeyPath, GLib.FileTest.EXISTS)) {
+            logError(`ClimaCN: 找不到 JWT 私钥文件: ${this._jwtKeyPath}`);
+            return null;
+        }
+        const iat = now - 30;
+        const exp = iat + 900;
+        const b64url = data => GLib.base64_encode(data)
+            .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        const encoder = new TextEncoder();
+        const signingInput =
+            b64url(encoder.encode(JSON.stringify({ alg: 'EdDSA', kid: this._jwtKid }))) + '.' +
+            b64url(encoder.encode(JSON.stringify({ iss: this._jwtIss, sub: this._jwtSub, iat, exp })));
+        const tmpPath = GLib.build_filenamev([GLib.get_tmp_dir(), `climacn-jwt-${Date.now()}.dat`]);
+        try {
+            GLib.file_set_contents(tmpPath, signingInput);
+            const openssl = GLib.find_program_in_path('openssl') || '/usr/bin/openssl';
+            const proc = Gio.Subprocess.new(
+                [openssl, 'pkeyutl', '-sign', '-inkey', this._jwtKeyPath, '-rawin', '-in', tmpPath],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+            const [, stdout, stderr] = proc.communicate(null, null);
+            if (!proc.get_successful()) {
+                const msg = stderr ? new TextDecoder().decode(stderr.get_data()).trim() : '';
+                logError(`ClimaCN: openssl 签名失败: ${msg}`);
+                return null;
+            }
+            const signature = b64url(stdout.get_data());
+            this._jwtToken = `${signingInput}.${signature}`;
+            this._jwtExp = exp;
+            return this._jwtToken;
+        } catch (e) {
+            logError(`ClimaCN: 生成 JWT 失败: ${e}`);
+            return null;
+        } finally {
+            try {
+                Gio.File.new_for_path(tmpPath).delete(null);
+            } catch (e) {
+                // 忽略清理失败
+            }
+        }
     }
 
     _qweatherUsable() {
@@ -2613,7 +2701,7 @@ export default class ClimaCNExtension extends Extension {
             callback(null);
             return;
         }
-        message.request_headers.append('X-Qw-Api-Key', this._apiKey);
+        this._appendQweatherAuth(message);
         this._countRequest();
         this._sendJson(message, seq, '和风实时', json => {
             if (json && (!json.condition || !json.temperature)) {
@@ -2672,7 +2760,7 @@ export default class ClimaCNExtension extends Extension {
             callback(null);
             return;
         }
-        message.request_headers.append('X-Qw-Api-Key', this._apiKey);
+        this._appendQweatherAuth(message);
         this._countRequest();
 
         this._session.send_and_read_async(
@@ -2715,7 +2803,7 @@ export default class ClimaCNExtension extends Extension {
             callback(null);
             return;
         }
-        message.request_headers.append('X-Qw-Api-Key', this._apiKey);
+        this._appendQweatherAuth(message);
         this._countRequest();
 
         this._session.send_and_read_async(

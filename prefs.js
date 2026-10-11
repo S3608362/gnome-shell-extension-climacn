@@ -76,7 +76,8 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
 
         const apiGroup = new Adw.PreferencesGroup({
             title: 'API 设置',
-            description: '两项均可在和风天气控制台获取。公共 API 地址（devapi.qweather.com 等）自 2026 年起停止服务，请务必填写你自己的 API Host。',
+            description: '两项均可在和风天气控制台获取。公共 API 地址（devapi.qweather.com 等）自 2026 年起停止服务，请务必填写你自己的 API Host。' +
+                'API Key 将于 2027 年起逐步限流并淘汰，推荐改用 JWT 认证。',
         });
         page.add(apiGroup);
 
@@ -97,6 +98,29 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
             settings.set_string('api-base-url', widget.text);
         });
         apiGroup.add(apiHostRow);
+
+        const useJwtRow = new Adw.SwitchRow({
+            title: '使用 JWT 认证（推荐）',
+            subtitle: '和风推荐的身份认证方式。开启后忽略上面的 API Key，改用下方 Ed25519 JWT 凭据。' +
+                'JWT 由扩展在本地用私钥现签，有效期 15 分钟并自动续签。',
+        });
+        settings.bind('use-jwt', useJwtRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+        apiGroup.add(useJwtRow);
+
+        const jwtRows = [
+            ['jwt-kid', 'Key ID (kid)'],
+            ['jwt-iss', '开发者ID (iss，Q 开头 10 位)'],
+            ['jwt-sub', '项目ID (sub)'],
+            ['jwt-key-path', 'Ed25519 私钥路径 (.pem)'],
+        ];
+        for (const [key, title] of jwtRows) {
+            const row = new Adw.EntryRow({
+                title,
+                text: settings.get_string(key) || '',
+            });
+            row.connect('changed', (widget) => settings.set_string(key, widget.text));
+            apiGroup.add(row);
+        }
 
         const sourcePickGroup = new Adw.PreferencesGroup({
             title: '数据源',

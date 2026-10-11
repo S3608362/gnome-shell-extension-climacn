@@ -17,6 +17,37 @@
         自 2026 年起逐步停止服务，因此不提供默认值。</description>
     </key>
 
+    <key name="use-jwt" type="b">
+      <default>false</default>
+      <summary>使用 JWT 认证</summary>
+      <description>开启后忽略 API Key，改用和风推荐的 Ed25519 JWT 认证。
+        需要同时填写 jwt-kid / jwt-iss / jwt-sub / jwt-key-path。</description>
+    </key>
+
+    <key name="jwt-kid" type="s">
+      <default>''</default>
+      <summary>JWT 凭据 ID（kid）</summary>
+      <description>和风控制台-项目管理中 JWT 凭据的 ID。</description>
+    </key>
+
+    <key name="jwt-iss" type="s">
+      <default>''</default>
+      <summary>JWT 签发者（iss，开发者ID）</summary>
+      <description>Q 开头的 10 位开发者ID，可在控制台-设置中查看。</description>
+    </key>
+
+    <key name="jwt-sub" type="s">
+      <default>''</default>
+      <summary>JWT 签发主体（sub，项目ID）</summary>
+      <description>控制台-项目管理中的项目ID。</description>
+    </key>
+
+    <key name="jwt-key-path" type="s">
+      <default>''</default>
+      <summary>JWT 私钥路径（Ed25519 PEM）</summary>
+      <description>本地 Ed25519 私钥文件的绝对路径，用于对 JWT 签名。</description>
+    </key>
+
     <key name="latitude" type="d">
       <default>39.9050</default>
       <summary>当前城市纬度</summary>
