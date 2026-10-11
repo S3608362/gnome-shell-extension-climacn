@@ -15,6 +15,8 @@ import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/
 
 const UPDATE_INTERVAL_SEC = 15 * 60;
 const BATTERY_INTERVAL_SEC = 30 * 60;
+const REQUEST_TIMEOUT_SEC = 15;
+const RETRY_DELAYS_SEC = [5, 15, 45];
 const CACHE_TTL_SEC = 5 * 60;
 const MANUAL_COOLDOWN_SEC = 60;
 const DAILY_REQUEST_BUDGET = 800;
@@ -872,6 +874,7 @@ export default class ClimaCNExtension extends Extension {
         this._calendarGrid = null;
         this._calendarCityLabel = null;
         this._session = new Soup.Session();
+        this._session.timeout = REQUEST_TIMEOUT_SEC;
         this._cancellable = new Gio.Cancellable();
 
         this._cityData = null;
@@ -903,6 +906,10 @@ export default class ClimaCNExtension extends Extension {
         this._lastForecast = null;
         this._attributionText = '';
         this._errorShown = false;
+        this._lastGood = null;
+        this._lastGoodTime = '';
+        this._retryId = 0;
+        this._retryCount = 0;
 
         this._writingSettings = false;
 
@@ -1031,6 +1038,10 @@ export default class ClimaCNExtension extends Extension {
         if (this._timeoutId) {
             GLib.Source.remove(this._timeoutId);
             this._timeoutId = 0;
+        }
+        if (this._retryId) {
+            GLib.Source.remove(this._retryId);
+            this._retryId = 0;
         }
         if (this._searchTimeoutId) {
             GLib.Source.remove(this._searchTimeoutId);
@@ -2354,6 +2365,32 @@ export default class ClimaCNExtension extends Extension {
         this._startAutoRefresh();
     }
 
+    _scheduleRetry() {
+        if (!this._enabled || this._retryId)
+            return;
+        if (this._retryCount >= RETRY_DELAYS_SEC.length)
+            return;
+        const delay = RETRY_DELAYS_SEC[this._retryCount];
+        this._retryCount++;
+        this._retryId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, delay, () => {
+            this._retryId = 0;
+            if (!this._enabled)
+                return GLib.SOURCE_REMOVE;
+            if (this._requestBudgetExhausted() && !this._anyOpenMeteoSource())
+                return GLib.SOURCE_REMOVE;
+            this._fetchWeather();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _cancelRetry() {
+        this._retryCount = 0;
+        if (this._retryId) {
+            GLib.Source.remove(this._retryId);
+            this._retryId = 0;
+        }
+    }
+
     _autoRefreshTick() {
         if (this._requestBudgetExhausted() && !this._anyOpenMeteoSource()) {
             this._refreshAlerts();
@@ -2362,6 +2399,7 @@ export default class ClimaCNExtension extends Extension {
         }
         if (this._secondsSinceFetch() < CACHE_TTL_SEC)
             return;
+        this._retryCount = 0;
         this._fetchWeather();
     }
 
@@ -2370,6 +2408,7 @@ export default class ClimaCNExtension extends Extension {
             return;
         if (this._secondsSinceFetch() < MANUAL_COOLDOWN_SEC)
             return;
+        this._retryCount = 0;
         this._fetchWeather();
     }
 
@@ -2628,7 +2667,7 @@ export default class ClimaCNExtension extends Extension {
         const om = pending.omForecast ?? null;
         const omDays = Array.isArray(om?.daily) ? om.daily : null;
 
-        const now = plan.src.current === 'qweather'
+        let now = plan.src.current === 'qweather'
             ? (pending.qwCurrent ?? null)
             : (om?.current ?? null);
 
@@ -2647,22 +2686,48 @@ export default class ClimaCNExtension extends Extension {
             forecast = astroDays.map(d => ({ astro: d.astro }));
         }
 
-        const aqi = plan.src.airQuality === 'qweather'
+        let aqi = plan.src.airQuality === 'qweather'
             ? (pending.qwAqi ?? null)
             : (pending.omAqi ?? null);
+
+        const expectCurrent = plan.qwCurrent || plan.omForecast;
+        const expectForecast = plan.qwDaily || plan.omForecast;
+        const expectAqi = plan.qwAqi || plan.omAqi;
+        const freshCurrent = expectCurrent ? !!now : true;
+        const partialFail = (expectCurrent && !now) ||
+            (expectForecast && !Array.isArray(forecast)) ||
+            (expectAqi && !aqi);
+
+        // 失败时回退到上一次成功的数据，避免一次网络抖动就把界面清空
+        const good = this._lastGood;
+        if (good) {
+            if (!now) now = good.now;
+            if (!Array.isArray(forecast)) forecast = good.forecast;
+            if (!aqi) aqi = good.aqi;
+        }
 
         if (!now) {
             if (!this._errorShown)
                 this._showError(_('获取失败'), 'network');
+            this._scheduleRetry();
             return;
         }
         if (now.temperature?.value === null || now.temperature?.value === undefined) {
             this._showError(_('数据格式异常'), 'data');
+            this._scheduleRetry();
             return;
         }
 
         this._attributionText = this._attributionFor(plan);
         this._updateUI(now, forecast, aqi);
+        if (freshCurrent)
+            this._lastGoodTime = this._updateTimeLabel.text;
+        else if (this._lastGoodTime)
+            this._updateTimeLabel.text = this._lastGoodTime;
+        this._lastGood = { now, forecast, aqi };
+        this._cancelRetry();
+        if (partialFail)
+            this._scheduleRetry();
     }
 
     _fetchForecast(seq, callback) {
