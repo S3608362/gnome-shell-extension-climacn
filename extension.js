@@ -28,10 +28,13 @@ import {
 } from './lib/drawing.js';
 import {
     BATTERY_INTERVAL_SEC,
+    FETCH_WATCHDOG_SEC,
     CACHE_TTL_SEC,
     DAILY_REQUEST_BUDGET,
     FORECAST_ROWS,
     MANUAL_COOLDOWN_SEC,
+    REQUEST_TIMEOUT_SEC,
+    RETRY_DELAYS_SEC,
     UPDATE_INTERVAL_SEC,
     compassToChinese,
     currentRequestCount,
@@ -75,6 +78,9 @@ export default class ClimaCNExtension extends Extension {
 
         this._indicator = null;
         this._timeoutId = 0;
+        this._retryId = 0;
+        this._retryCount = 0;
+        this._fetchWatchdogId = 0;
         this._configDebounceId = 0;
         this._debugLoggingId = 0;
         this._sourceCurrentId = 0;
@@ -86,6 +92,7 @@ export default class ClimaCNExtension extends Extension {
         this._showInCalendarId = 0;
         this._showAlertsId = 0;
         this._session = new Soup.Session();
+        this._session.timeout = REQUEST_TIMEOUT_SEC;
 
         this._iconExistsCache = new Map();
         this._requestSeq = 0;
@@ -197,6 +204,11 @@ export default class ClimaCNExtension extends Extension {
         if (this._timeoutId) {
             GLib.Source.remove(this._timeoutId);
             this._timeoutId = 0;
+        }
+        this._cancelRetry();
+        if (this._fetchWatchdogId) {
+            GLib.Source.remove(this._fetchWatchdogId);
+            this._fetchWatchdogId = 0;
         }
         if (this._configDebounceId) {
             GLib.Source.remove(this._configDebounceId);
@@ -749,6 +761,30 @@ export default class ClimaCNExtension extends Extension {
         this._startAutoRefresh();
     }
 
+    _scheduleRetry() {
+        if (!this._isActive() || this._retryId)
+            return;
+        if (this._requestBudgetExhausted() && !this._anyOpenMeteoSource())
+            return;
+        const i = Math.min(this._retryCount, RETRY_DELAYS_SEC.length - 1);
+        this._retryCount++;
+        this._retryId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, RETRY_DELAYS_SEC[i], () => {
+            this._retryId = 0;
+            if (!this._isActive())
+                return GLib.SOURCE_REMOVE;
+            this._fetchWeather();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _cancelRetry() {
+        this._retryCount = 0;
+        if (this._retryId) {
+            GLib.Source.remove(this._retryId);
+            this._retryId = 0;
+        }
+    }
+
     _autoRefreshTick() {
         if (this._requestBudgetExhausted() && !this._anyOpenMeteoSource()) {
             this._alerts.refresh();
@@ -757,6 +793,7 @@ export default class ClimaCNExtension extends Extension {
         }
         if (this._secondsSinceFetch() < CACHE_TTL_SEC)
             return;
+        this._cancelRetry();
         this._fetchWeather();
     }
 
@@ -765,6 +802,7 @@ export default class ClimaCNExtension extends Extension {
             return;
         if (this._secondsSinceFetch() < MANUAL_COOLDOWN_SEC)
             return;
+        this._cancelRetry();
         this._fetchWeather();
     }
 
@@ -918,7 +956,7 @@ export default class ClimaCNExtension extends Extension {
                 callback(null);
                 return;
             }
-            const daily = openMeteoAsQweatherDaily(json);
+            const daily = openMeteoAsQweatherDaily(json, this._latitude, this._longitude);
             if (daily.length === 0) {
                 this._showError(_('备用数据源返回数据不完整'), 'data');
                 callback(null);
@@ -980,6 +1018,10 @@ export default class ClimaCNExtension extends Extension {
             if (settled || !needed.every(k => k in pending))
                 return;
             settled = true;
+            if (this._fetchWatchdogId) {
+                GLib.Source.remove(this._fetchWatchdogId);
+                this._fetchWatchdogId = 0;
+            }
             if (!this._isActive() || seq !== this._requestSeq)
                 return;
             this._applyPlan(plan, pending);
@@ -988,6 +1030,23 @@ export default class ClimaCNExtension extends Extension {
             pending[key] = value;
             settle();
         };
+
+        if (this._fetchWatchdogId) {
+            GLib.Source.remove(this._fetchWatchdogId);
+            this._fetchWatchdogId = 0;
+        }
+        this._fetchWatchdogId = GLib.timeout_add_seconds(
+            GLib.PRIORITY_DEFAULT, FETCH_WATCHDOG_SEC, () => {
+                this._fetchWatchdogId = 0;
+                if (settled)
+                    return GLib.SOURCE_REMOVE;
+                settled = true;
+                if (!this._isActive() || seq !== this._requestSeq)
+                    return GLib.SOURCE_REMOVE;
+                logError('抓取超时，按失败处理');
+                this._applyPlan(plan, pending);
+                return GLib.SOURCE_REMOVE;
+            });
 
         if (plan.qwCurrent)
             this._fetchQweatherCurrent(seq, v => done('qwCurrent', v));
@@ -1046,18 +1105,32 @@ export default class ClimaCNExtension extends Extension {
             ? (pending.qwAqi ?? null)
             : (pending.omAqi ?? null);
 
+        const expectForecast = plan.qwDaily || plan.omForecast;
+        const expectAqi = plan.qwAqi || plan.omAqi;
+
         if (!now) {
             if (!this._errorShown)
                 this._showError(_('获取失败'), 'network');
+            this._scheduleRetry();
             return;
         }
         if (now.temperature?.value === null || now.temperature?.value === undefined) {
             this._showError(_('数据格式异常'), 'data');
+            this._scheduleRetry();
             return;
         }
 
         this._attributionText = this._attributionFor(plan);
         this._updateUI(now, forecast, aqi);
+
+        const incomplete = (expectForecast && !Array.isArray(forecast)) ||
+            (expectAqi && !aqi);
+        if (incomplete) {
+            logError('本轮部分数据缺失，稍后重试');
+            this._scheduleRetry();
+        } else {
+            this._cancelRetry();
+        }
     }
 
     _fetchForecast(seq, callback) {
