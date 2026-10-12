@@ -168,5 +168,11 @@ export default class ClimaCNPreferences extends ExtensionPreferences {
                 '天气图标来源于和风天气图标库（https://icons.qweather.com/），采用 CC BY 4.0 许可',
         });
         page.add(sourceGroup);
+
+        const aboutGroup = new Adw.PreferencesGroup({
+            title: '关于',
+            description: '这是个人自用的扩展，按作者自己的需要随手增改，没有维护计划，也不作任何承诺。',
+        });
+        page.add(aboutGroup);
     }
 }
