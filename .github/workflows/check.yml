@@ -1,0 +1,98 @@
+name: Check
+
+# 推 main 和提 PR 时跑一遍。目的是在打标签之前发现问题 ——
+# 标签一旦推出去，release.yml 会直接发布一个坏包。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 语法检查
+        run: |
+          set -uo pipefail
+          ok=1
+          for f in extension.js prefs.js lib/*.js ui/*.js; do
+            if node --input-type=module --check < "$f" 2>/tmp/err; then
+              echo "  ✓ $f"
+            else
+              echo "  ✗ $f"; cat /tmp/err; ok=0
+            fi
+          done
+          [ "$ok" = 1 ]
+
+      - name: 模块导入可解析
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in extension.js lib/*.js ui/*.js; do
+            while read -r spec; do
+              case "$spec" in
+                ./*)
+                  target="$(dirname "$f")/${spec#./}"
+                  [ -f "$target" ] || { echo "  ✗ $f → $spec 不存在"; fail=1; }
+                  ;;
+              esac
+            done < <(grep -oE "from '\.[^']*'" "$f" | sed "s/from '//; s/'$//")
+          done
+          [ "$fail" = 0 ] && echo "  ✓ 相对导入全部可解析"
+
+      - name: metadata.json
+        run: |
+          node -e '
+            const fs = require("fs");
+            const m = JSON.parse(fs.readFileSync("metadata.json", "utf8"));
+            const need = ["name", "uuid", "settings-schema", "shell-version"];
+            const missing = need.filter(k => !m[k]);
+            if (missing.length) { console.error("缺少字段: " + missing.join(", ")); process.exit(1); }
+            const v = m["shell-version"];
+            if (!Array.isArray(v) || !v.length || v.some(x => !/^\d+$/.test(x))) {
+              console.error("shell-version 必须是非空的正整数版本号数组"); process.exit(1);
+            }
+            const expect = "climacn-weather@outlook.com";
+            if (m.uuid !== expect) { console.error("uuid 不符: " + m.uuid); process.exit(1); }
+            if (m["settings-schema"] !== "org.gnome.shell.extensions." + expect) {
+              console.error("settings-schema 不符"); process.exit(1);
+            }
+            console.log("  ✓ metadata.json 合法，shell-version = " + v.join("/"));
+          '
+
+      - name: schema 与 UUID 对得上
+        run: |
+          set -euo pipefail
+          f="schemas/org.gnome.shell.extensions.climacn-weather@outlook.com.gschema.xml"
+          [ -f "$f" ] || { echo "✗ 找不到 $f"; exit 1; }
+          grep -q 'schema id="org.gnome.shell.extensions.climacn-weather@outlook.com"' "$f" \
+            || { echo "✗ schema id 与 UUID 不一致"; exit 1; }
+          echo "  ✓ schema id 正确"
+
+      - name: 预演打包
+        run: |
+          set -euo pipefail
+          ZIP=climacn-weather@outlook.com.shell-extension.zip
+          zip -q -r -X "$ZIP" \
+            extension.js prefs.js stylesheet.css metadata.json LICENSE NOTICE \
+            lib ui schemas/*.gschema.xml data icons \
+            -x 'schemas/gschemas.compiled' '*.pyc' '*__pycache__*' 'data/*.py'
+          # ⚠ 清单先取成变量：`unzip -Z1 | grep -q` 会因 grep 提前退出产生
+          #    SIGPIPE，在 pipefail 下整条管道被判失败，禁止项检查会静默失效。
+          list=$(unzip -Z1 "$ZIP")
+          top=$(grep -v / <<< "$list" | sort)
+          want=$(printf '%s\n' extension.js prefs.js stylesheet.css metadata.json LICENSE NOTICE | sort)
+          [ "$top" = "$want" ] || { echo "✗ 顶层文件不符"; echo "$top"; exit 1; }
+          for bad in README.md CHANGELOG.md schemas/gschemas.compiled; do
+            if grep -qxF "$bad" <<< "$list"; then
+              echo "✗ 包里不该有 $bad"; exit 1
+            fi
+          done
+          echo "  ✓ 打包内容正确（$(wc -l <<< "$list") 个文件）"

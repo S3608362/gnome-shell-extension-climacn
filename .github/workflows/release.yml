@@ -1,0 +1,118 @@
+name: Release
+
+# 推 v* 标签即自动打包并发布 Release。
+# 打包在 GitHub 的机器上做，不依赖本地环境，也不受本地网络影响。
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # 少了这行，GITHUB_TOKEN 建不了 Release、也传不了附件
+
+env:
+  ZIP: climacn-weather@outlook.com.shell-extension.zip
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 语法检查
+        run: |
+          set -uo pipefail
+          ok=1
+          for f in extension.js prefs.js lib/*.js ui/*.js; do
+            if node --input-type=module --check < "$f" 2>/tmp/err; then
+              echo "  ✓ $f"
+            else
+              echo "  ✗ $f"; cat /tmp/err; ok=0
+            fi
+          done
+          [ "$ok" = 1 ]
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          rm -f "$ZIP"
+          zip -q -r -X "$ZIP" \
+            extension.js prefs.js stylesheet.css metadata.json LICENSE NOTICE \
+            lib ui schemas/*.gschema.xml data icons \
+            -x 'schemas/gschemas.compiled' '*.pyc' '*__pycache__*' 'data/*.py'
+          ls -l "$ZIP"
+
+      - name: 校验包内容
+        run: |
+          set -euo pipefail
+          # ⚠ 先把清单取成变量，别写成 `unzip -Z1 | grep -q`。
+          #    grep -q 命中后立刻退出会让 unzip 收到 SIGPIPE，在 pipefail 下
+          #    整个管道被判为失败 —— 「存在」被误判成「缺失」，而 `&& 报错`
+          #    那种写法则会变成静默跳过。用 here-string 匹配，不产生管道。
+          list=$(unzip -Z1 "$ZIP")
+
+          top=$(grep -v / <<< "$list" | sort)
+          want=$(printf '%s\n' extension.js prefs.js stylesheet.css metadata.json LICENSE NOTICE | sort)
+          if [ "$top" != "$want" ]; then
+            echo "✗ 顶层文件不符"; echo "实际:"; echo "$top"; exit 1
+          fi
+          echo "✓ 顶层文件正确"
+
+          for bad in README.md CHANGELOG.md schemas/gschemas.compiled settings.json; do
+            if grep -qxF "$bad" <<< "$list"; then
+              echo "✗ 包里不该有：$bad"; exit 1
+            fi
+          done
+          if grep -qE '(__pycache__|\.pyc$|^data/.*\.py$)' <<< "$list"; then
+            echo "✗ 包里混进了 Python 产物"; exit 1
+          fi
+          echo "✓ 排除项正确"
+
+          # 这些是功能命门，缺一个装上去就不工作
+          for need in lib/util.js lib/astro.js ui/trendChart.js ui/sunMoonBands.js \
+                      "schemas/org.gnome.shell.extensions.climacn-weather@outlook.com.gschema.xml" \
+                      data/CMA-Station-List.csv; do
+            grep -qxF "$need" <<< "$list" || { echo "✗ 缺少 $need"; exit 1; }
+          done
+          echo "✓ 必需文件齐全"
+
+      - name: 生成 Release 说明
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## v" v "$" || $0 ~ "^## v" v "[[:space:]]" {inside=1; next}
+            inside && /^## v/ {inside=0}
+            inside {print}
+          ' CHANGELOG.md > NOTES.md
+
+          if ! grep -q '[^[:space:]]' NOTES.md; then
+            echo "✗ CHANGELOG.md 里找不到 v$version 这一节"; exit 1
+          fi
+
+          printf '%s\n' '' '### 安装' '' '```bash' \
+            'mkdir -p ~/.local/share/gnome-shell/extensions/climacn-weather@outlook.com' \
+            'unzip -o climacn-weather@outlook.com.shell-extension.zip \' \
+            '  -d ~/.local/share/gnome-shell/extensions/climacn-weather@outlook.com' \
+            'glib-compile-schemas \' \
+            '  ~/.local/share/gnome-shell/extensions/climacn-weather@outlook.com/schemas/' \
+            '```' '' \
+            '重启 GNOME Shell（X11 按 `Alt+F2` 输入 `r`；Wayland 注销后重新登录），' \
+            '然后在「扩展」应用里启用。' '' \
+            '支持 GNOME Shell 45 – 50。' >> NOTES.md
+          cat NOTES.md
+
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release 已存在，只更新附件"
+            gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$ZIP" \
+              --title "ClimaCN $GITHUB_REF_NAME" \
+              --notes-file NOTES.md
+          fi
+          echo "✓ https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME"
