@@ -185,10 +185,6 @@ export default class ClimaCNExtension extends Extension {
         });
         setDebugLogging(this._settings.get_boolean('debug-logging'));
 
-        this._stylesheetPath = this.path + '/stylesheet.css';
-        this._theme = St.ThemeContext.get_for_stage(global.stage).get_theme();
-        this._theme.load_stylesheet(Gio.File.new_for_path(this._stylesheetPath));
-
         this._createIndicator();
         this._calendar = new CalendarSection(this);
         this._calendar.build();
@@ -218,10 +214,6 @@ export default class ClimaCNExtension extends Extension {
         if (this._session) {
             this._session.abort();
             this._session = null;
-        }
-        if (this._stylesheetPath && this._theme) {
-            const file = Gio.File.new_for_path(this._stylesheetPath);
-            try { this._theme.unload_stylesheet(file); } catch (e) { logError(e); }
         }
 
         this._destroyUI();
@@ -307,8 +299,6 @@ export default class ClimaCNExtension extends Extension {
         this._lastFetchAt = 0;
         this._onBattery = false;
         this._upowerSignalId = 0;
-        this._stylesheetPath = null;
-        this._theme = null;
         this._cancellable = null;
     }
 
